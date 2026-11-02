@@ -60,11 +60,14 @@ bool Program::Load(const std::string& path, const std::string& symdir,
     return false;
   }
   const recomp::PeImage& img = m.img;
-  for (const auto& s : img.sections)
-    if (s.name == ".text") {
-      m.text_lo = s.va;
-      m.text_hi = s.va + s.vsize;
-    }
+  {
+    recomp::gaddr lo, hi;
+    img.CodeSpan(&lo, &hi);
+    m.text_lo = lo;
+    m.text_hi = hi;
+    for (const auto& s : img.sections)
+      if (s.characteristics & 0x20000000) m.code.emplace_back(s.va, s.va + s.vsize);
+  }
   if (!m.text_hi) {
     *err = "no .text section";
     return false;
@@ -72,7 +75,7 @@ bool Program::Load(const std::string& path, const std::string& symdir,
   // Symbol files hold VAs at the preferred base; a moved module's are
   // shifted by the same delta as its relocations.
   const uint64_t delta = img.image_base - img.preferred_base;
-  auto in_text = [&](uint64_t va) { return va >= m.text_lo && va < m.text_hi; };
+  auto in_text = [&](uint64_t va) { return m.CodeEnd(va) != 0; };
 
   // Ghidra's function list: entry, min, max, chunks, thunk, noreturn,
   // callconv, name.

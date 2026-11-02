@@ -46,11 +46,10 @@ uint32_t g_lifted_count = 0;
 
 CodeRange TextOf(const PeImage& img) {
   CodeRange r;
-  for (const auto& s : img.sections)
-    if (s.name == ".text") {
-      r.lo = s.va;
-      r.size = s.vsize;
-    }
+  gaddr lo, hi;
+  img.CodeSpan(&lo, &hi);
+  r.lo = lo;
+  r.size = hi - lo;
   r.table.assign(r.size, nullptr);
   for (uint32_t i = 0; i < g_lifted_count; i++) {
     const LiftedFn& f = g_lifted[i];

@@ -44,11 +44,15 @@
 namespace {
 
 void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
-  size_t pos = 0;
-  while ((pos = s.find(from, pos)) != std::string::npos) {
-    s.replace(pos, from.size(), to);
-    pos += to.size();
+  std::string out;
+  out.reserve(s.size());
+  size_t pos = 0, hit;
+  while ((hit = s.find(from, pos)) != std::string::npos) {
+    out.append(s, pos, hit - pos).append(to);
+    pos = hit + from.size();
   }
+  out.append(s, pos, std::string::npos);
+  s = std::move(out);
 }
 
 // Shorten the fully qualified helper names; keeps generated files smaller

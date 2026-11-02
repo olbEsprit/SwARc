@@ -80,6 +80,17 @@ struct PeImage {
   PeTls tls;
   bool has_tls = false;
 
+  // [lo, hi) spanning every executable section (SecuROM adds code sections
+  // after the data, and moves game functions there).
+  void CodeSpan(gaddr* lo, gaddr* hi) const {
+    *lo = *hi = 0;
+    for (const auto& s : sections)
+      if (s.characteristics & 0x20000000) {
+        if (!*hi || s.va < *lo) *lo = s.va;
+        if (s.va + s.vsize > *hi) *hi = s.va + s.vsize;
+      }
+  }
+
   // True if the file is a PE32+ AMD64 image (to size the arena before
   // loading it).
   static bool IsX64File(const std::string& path);

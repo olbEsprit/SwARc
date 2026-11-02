@@ -20,7 +20,15 @@ namespace lifter {
 struct Module {
   std::string name;  // file name without extension, e.g. "game"
   recomp::PeImage img;
-  uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
+  uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) spanning the code sections
+  std::vector<std::pair<uint64_t, uint64_t>> code;  // [lo, hi) of each one
+
+  // End of the code section holding va, or 0.
+  uint64_t CodeEnd(uint64_t va) const {
+    for (const auto& [lo, hi] : code)
+      if (va >= lo && va < hi) return hi;
+    return 0;
+  }
 };
 
 struct Program {
@@ -75,12 +83,12 @@ struct Program {
   // The module whose .text contains va, or null.
   const Module* TextOf(uint64_t va) const {
     for (const auto& m : modules)
-      if (va >= m.text_lo && va < m.text_hi) return &m;
+      if (m.CodeEnd(va)) return &m;
     return nullptr;
   }
   bool InText(uint64_t va) const { return TextOf(va) != nullptr; }
   const uint8_t* Bytes(uint64_t va) const { return mem.ptr<uint8_t>(va); }
-  size_t BytesLeft(uint64_t va) const { return TextOf(va)->text_hi - va; }
+  size_t BytesLeft(uint64_t va) const { return TextOf(va)->CodeEnd(va) - va; }
 };
 
 }  // namespace lifter
