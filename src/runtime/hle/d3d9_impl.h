@@ -167,6 +167,10 @@ struct DeviceState {
   uint32_t tss[8][33] = {};
   uint32_t fvf = 0;
   std::map<uint32_t, std::array<float, 16>> transforms;
+  guest::D3DMATERIAL9 material{};
+  std::map<uint32_t, guest::D3DLIGHT9> lights;
+  std::map<uint32_t, bool> light_on;
+  float clip_planes[6][4] = {};
   guest::D3DVIEWPORT9 viewport{};
   guest::D3DRECT scissor{};
   float vs_f[256][4] = {}, ps_f[224][4] = {};

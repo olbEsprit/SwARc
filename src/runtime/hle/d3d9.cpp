@@ -403,6 +403,10 @@ DeviceState Snapshot(const Device& d) {
   std::memcpy(s.tss, d.tss, sizeof s.tss);
   s.fvf = d.fvf;
   s.transforms = d.transforms;
+  s.material = d.material;
+  s.lights = d.lights;
+  s.light_on = d.light_on;
+  std::memcpy(s.clip_planes, d.clip_planes, sizeof s.clip_planes);
   s.viewport = d.viewport;
   s.scissor = d.scissor;
   std::memcpy(s.vs_f, d.vs_f, sizeof s.vs_f);
@@ -453,6 +457,10 @@ void ApplyState(Device& d, const DeviceState& s) {
   std::memcpy(d.tss, s.tss, sizeof d.tss);
   d.fvf = s.fvf;
   d.transforms = s.transforms;
+  d.material = s.material;
+  d.lights = s.lights;
+  d.light_on = s.light_on;
+  std::memcpy(d.clip_planes, s.clip_planes, sizeof d.clip_planes);
   d.viewport = s.viewport;
   d.scissor = s.scissor;
   std::memcpy(d.vs_f, s.vs_f, sizeof d.vs_f);
