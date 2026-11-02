@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <set>
 
@@ -86,6 +87,23 @@ struct DIDEVICEOBJECTDATA {
   uint32_t dwOfs, dwData, dwTimeStamp, dwSequence, uAppData;
 };
 
+// DIACTIONA and the head of DIACTIONFORMATA (action maps).
+struct DIACTIONA {
+  uint32_t uAppData, dwSemantic, dwFlags, lptszActionName;
+  GUID guidInstance;
+  uint32_t dwObjID, dwHow;
+};
+static_assert(sizeof(DIACTIONA) == 40);
+
+struct DIACTIONFORMATA {
+  uint32_t dwSize, dwActionSize, dwDataSize, dwNumActions, rgoAction;
+  GUID guidActionMap;
+  uint32_t dwGenre, dwBufferSize;
+};
+
+constexpr uint32_t DIAH_UNMAPPED = 0, DIAH_DEFAULT = 0x20;
+constexpr uint32_t DIDFT_BUTTON = 0x0C;
+
 struct Direct8 : com::Object {};
 
 struct InputDevice : com::Object {
@@ -103,8 +121,10 @@ struct InputDevice : com::Object {
   bool absolute = false;
   int32_t axis[3] = {};
   uint8_t buttons[8] = {};
-  // Keyboard: DIK state.
+  // Keyboard: DIK state; with an action map, the uAppData of each mapped key.
   uint8_t keys[256] = {};
+  bool mapped = false;
+  std::map<uint8_t, uint32_t> actions;
   ~InputDevice() override;
 };
 
@@ -112,13 +132,13 @@ std::mutex g_mu;
 std::set<InputDevice*> g_acquired;  // devices that get raw input
 uint32_t g_sequence = 0;
 
-void Record(InputDevice& d, uint32_t ofs, uint32_t data, uint32_t time) {
+void Record(InputDevice& d, uint32_t ofs, uint32_t data, uint32_t time, uint32_t app = 0) {
   if (!d.buffer_size) return;
   if (d.buffer.size() >= d.buffer_size) {
     d.buffer.pop_front();
     d.overflow = true;
   }
-  d.buffer.push_back({ofs, data, time, ++g_sequence, 0});
+  d.buffer.push_back({ofs, data, time, ++g_sequence, app});
 }
 
 void OnRawInput(const RawInput& in) {
@@ -129,7 +149,11 @@ void OnRawInput(const RawInput& in) {
       uint8_t v = in.value ? 0x80 : 0;
       if (d->keys[in.code] == v) continue;
       d->keys[in.code] = v;
-      Record(*d, in.code, v, in.time_ms);
+      if (!d->mapped) {
+        Record(*d, in.code, v, in.time_ms);
+      } else if (auto it = d->actions.find(uint8_t(in.code)); it != d->actions.end()) {
+        Record(*d, in.code, v, in.time_ms, it->second);
+      }
       continue;
     }
     switch (in.kind) {
@@ -465,6 +489,39 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceData", DID8_GetDeviceDa
   bool overflow = d->overflow;
   if (!(flags & DIGDD_PEEK)) d->overflow = false;
   return overflow ? DI_BUFFEROVERFLOW : DI_OK;
+}
+
+// (lpdiaf, lpszUserName, dwFlags): the keyboard takes the DIKEYBOARD_* semantics, nothing else maps.
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::BuildActionMap", DID8_BuildActionMap, 4) {
+  InputDevice* d = Dev(c);
+  auto* f = reinterpret_cast<DIACTIONFORMATA*>(GPtr(Arg(c, 1)));
+  for (uint32_t i = 0; i < f->dwNumActions; i++) {
+    auto* a = reinterpret_cast<DIACTIONA*>(GPtr(f->rgoAction + i * sizeof(DIACTIONA)));
+    if (d->keyboard && (a->dwSemantic & 0xFF000000) == 0x81000000) {
+      a->guidInstance = kGUID_SysKeyboard;
+      a->dwObjID = (a->dwSemantic & 0xFF) << 8 | DIDFT_BUTTON;
+      a->dwHow = DIAH_DEFAULT;
+    } else {
+      a->dwHow = DIAH_UNMAPPED;
+    }
+  }
+  return DI_OK;
+}
+
+HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::SetActionMap", DID8_SetActionMap, 4) {
+  InputDevice* d = Dev(c);
+  if (d->acquired) return DIERR_ACQUIRED;
+  auto* f = reinterpret_cast<DIACTIONFORMATA*>(GPtr(Arg(c, 1)));
+  std::lock_guard<std::mutex> l(g_mu);
+  d->actions.clear();
+  for (uint32_t i = 0; i < f->dwNumActions; i++) {
+    auto* a = reinterpret_cast<DIACTIONA*>(GPtr(f->rgoAction + i * sizeof(DIACTIONA)));
+    if (d->keyboard && a->dwHow != DIAH_UNMAPPED && std::memcmp(&a->guidInstance, &kGUID_SysKeyboard, 16) == 0)
+      d->actions[uint8_t(a->dwObjID >> 8)] = a->uAppData;
+  }
+  d->mapped = true;
+  if (f->dwBufferSize) d->buffer_size = f->dwBufferSize;
+  return DI_OK;
 }
 
 }  // namespace
