@@ -271,7 +271,7 @@ uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t 
   *out = 0;
   gfx::Format f = FormatFromD3D(fmt);
   if (!w || !h || f == gfx::Format::Unknown || IsDepthFormat(f) ||
-      ((usage & D3DUSAGE_RENDERTARGET) && (pool != D3DPOOL_DEFAULT || cube))) {
+      ((usage & D3DUSAGE_RENDERTARGET) && pool != D3DPOOL_DEFAULT)) {
     WarnF("d3d9: Create%sTexture %ux%u fmt %X usage %X pool %u: not supported\n",
           cube ? "Cube" : "", w, h, fmt, usage, pool);
     return D3DERR_INVALIDCALL;
@@ -300,7 +300,8 @@ uint32_t NewTexture(Device& d, uint32_t device, bool cube, uint32_t w, uint32_t 
       t->lv.push_back(l);
     }
   if (pool != D3DPOOL_SYSTEMMEM && pool != D3DPOOL_SCRATCH) {
-    t->tex = cube ? d.gfx->CreateCubeTexture(int(w), int(levels), f)
+    t->tex = cube ? d.gfx->CreateCubeTexture(int(w), int(levels), f,
+                                             (usage & D3DUSAGE_RENDERTARGET) != 0)
                   : d.gfx->CreateTexture(int(w), int(h), int(levels), f,
                                          (usage & D3DUSAGE_RENDERTARGET) != 0);
     if (!t->tex) return 0x8876017C;  // D3DERR_OUTOFVIDEOMEMORY
@@ -354,11 +355,8 @@ void BindTargets(Device& d) {
     Surface* rt = com::As<Surface>(d.render_targets[i]);
     if (!rt) break;
     if (rt->kind == Surface::Kind::RenderTarget) color[i].tex = rt->tex;
-    if (rt->kind == Surface::Kind::TextureLevel) {
-      if (rt->texture->cube)
-        FatalF("d3d9: render target %d is a cube face (not supported)", i);
-      color[i] = {rt->texture->tex, int(rt->level)};
-    }
+    if (rt->kind == Surface::Kind::TextureLevel)
+      color[i] = {rt->texture->tex, int(rt->level), rt->texture->cube ? rt->face : 0};
     if (i > 0 && !color[i].tex)
       FatalF("d3d9: render target %d is a %s surface", i,
              rt->kind == Surface::Kind::BackBuffer ? "back buffer" : "non-target");

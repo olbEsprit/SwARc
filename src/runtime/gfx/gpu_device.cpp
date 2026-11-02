@@ -520,7 +520,7 @@ class GpuDevice final : public Device {
     if (it == textures_.end()) return;
     if (Pending(it->second.tex)) Flush();
     bool bound = current_color_ == id;
-    if (current_color_ == id) current_color_ = 0, current_level_ = 0;
+    if (current_color_ == id) current_color_ = 0, current_level_ = 0, current_face_ = 0;
     for (ColorTarget& e : current_extra_)
       if (e.tex == id) e = {}, bound = true;
     if (bound) BindTarget();
@@ -578,7 +578,7 @@ class GpuDevice final : public Device {
     Update(id, 0, level, r, src, pitch);
   }
 
-  TextureId CreateCubeTexture(int size, int levels, Format fmt) override {
+  TextureId CreateCubeTexture(int size, int levels, Format fmt, bool render_target) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     if (size <= 0) return 0;
     if (levels <= 0) {
@@ -590,10 +590,11 @@ class GpuDevice final : public Device {
     t.levels = levels;
     t.fmt = fmt;
     t.cube = true;
+    t.rt = render_target;
     SDL_GPUTextureCreateInfo ti{};
     ti.type = SDL_GPU_TEXTURETYPE_CUBE;
     ti.format = GpuFormat(fmt);
-    ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (render_target ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
     ti.width = ti.height = Uint32(size);
     ti.layer_count_or_depth = 6;
     ti.num_levels = Uint32(levels);
@@ -665,6 +666,7 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     current_color_ = color;
     current_level_ = 0;
+    current_face_ = 0;
     current_extra_.fill({});
     current_depth_ = depth;
     BindTarget();
@@ -674,6 +676,7 @@ class GpuDevice final : public Device {
     std::lock_guard<std::recursive_mutex> l(mu_);
     current_color_ = color[0].tex;
     current_level_ = color[0].tex ? color[0].level : 0;
+    current_face_ = color[0].tex ? color[0].face : 0;
     for (int i = 0; i < 3; i++) current_extra_[i] = color[i + 1];
     current_depth_ = depth;
     BindTarget();
@@ -707,12 +710,14 @@ class GpuDevice final : public Device {
     SDL_GPUBlitInfo bi{};
     bi.source.texture = s;
     bi.source.mip_level = Uint32(src.tex ? src.level : 0);
+    bi.source.layer_or_depth_plane = Uint32(src.tex ? src.face : 0);
     bi.source.x = Uint32(a.left);
     bi.source.y = Uint32(a.top);
     bi.source.w = Uint32(a.right - a.left);
     bi.source.h = Uint32(a.bottom - a.top);
     bi.destination.texture = d;
     bi.destination.mip_level = Uint32(dst.tex ? dst.level : 0);
+    bi.destination.layer_or_depth_plane = Uint32(dst.tex ? dst.face : 0);
     bi.destination.x = Uint32(b.left);
     bi.destination.y = Uint32(b.top);
     bi.destination.w = Uint32(b.right - b.left);
@@ -1529,13 +1534,14 @@ void r_color0(inout vec4 c) {
     bool alpha = false;
     std::array<SDL_GPUTexture*, 4> targets{};
     std::array<uint8_t, 4> fmts{};
-    std::array<int, 4> levels{};
+    std::array<int, 4> levels{}, faces{};
     fmts[0] = SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM;
     if (current_color_) {
       auto it = textures_.find(current_color_);
       if (it != textures_.end() && it->second.rt && current_level_ < it->second.levels) {
         color = it->second.tex;
         levels[0] = current_level_;
+        faces[0] = it->second.cube ? current_face_ : 0;
         w = LevelSize(it->second.w, current_level_);
         h = LevelSize(it->second.h, current_level_);
         alpha = HasAlpha(it->second.fmt);
@@ -1549,12 +1555,13 @@ void r_color0(inout vec4 c) {
       if (it == textures_.end() || !it->second.rt || e.level >= it->second.levels) break;
       targets[i + 1] = it->second.tex;
       levels[i + 1] = e.level;
+      faces[i + 1] = it->second.cube ? e.face : 0;
       fmts[i + 1] = uint8_t(GpuFormat(it->second.fmt));
     }
     const Depth* d = nullptr;
     auto dit = depths_.find(current_depth_);
     if (dit != depths_.end()) d = &dit->second;
-    SetPass(targets, fmts, d, w, h, alpha, levels);
+    SetPass(targets, fmts, d, w, h, alpha, levels, faces);
   }
 
   // A pass with the back buffer's format (back and front buffer).
@@ -1565,12 +1572,16 @@ void r_color0(inout vec4 c) {
   }
 
   void SetPass(const std::array<SDL_GPUTexture*, 4>& colors, const std::array<uint8_t, 4>& fmts,
-               const Depth* d, int w, int h, bool alpha, const std::array<int, 4>& levels = {}) {
+               const Depth* d, int w, int h, bool alpha, const std::array<int, 4>& levels = {},
+               const std::array<int, 4>& faces = {}) {
     SDL_GPUTexture* depth = d ? d->tex : nullptr;
-    if (colors == pass_colors_ && levels == pass_levels_ && depth == pass_depth_) return;
+    if (colors == pass_colors_ && levels == pass_levels_ && faces == pass_faces_ &&
+        depth == pass_depth_)
+      return;
     Flush();
     pass_colors_ = colors;
     pass_levels_ = levels;
+    pass_faces_ = faces;
     pass_fmts_ = fmts;
     pass_color_ = colors[0];
     pass_targets_ = 0;
@@ -1728,6 +1739,7 @@ void r_color0(inout vec4 c) {
         SDL_GPUColorTargetInfo& ct = cts[i];
         ct.texture = pass_colors_[i];
         ct.mip_level = Uint32(pass_levels_[i]);
+        ct.layer_or_depth_plane = Uint32(pass_faces_[i]);
         ct.load_op = pass_clear_color_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         ct.clear_color = clear_color_;
         ct.store_op = SDL_GPU_STOREOP_STORE;
@@ -2550,12 +2562,14 @@ void r_color0(inout vec4 c) {
   uint32_t next_id_ = 1;
   TextureId current_color_ = 0;
   int current_level_ = 0;
+  int current_face_ = 0;
   std::array<ColorTarget, 3> current_extra_{};  // targets 1-3
   DepthId current_depth_ = 0;
 
   // The pass being recorded: pass_color_ is target 0 of pass_colors_.
   std::array<SDL_GPUTexture*, 4> pass_colors_{};
   std::array<int, 4> pass_levels_{};  // mip level of each
+  std::array<int, 4> pass_faces_{};   // cube face of each
   std::array<uint8_t, 4> pass_fmts_{};
   int pass_targets_ = 0;
   SDL_GPUTexture* pass_color_ = nullptr;
