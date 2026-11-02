@@ -33,6 +33,9 @@ struct GameConfig {
   // paths with the root abbreviated: "HKLM\Software\...".
   struct RegistryString {
     std::string key, name, value;
+    // A value of another type (REG_BINARY 3, REG_DWORD 4): its raw bytes.
+    uint32_t type = 1;
+    std::vector<uint8_t> data;
   };
   std::vector<RegistryString> registry;
 

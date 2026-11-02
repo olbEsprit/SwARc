@@ -2340,7 +2340,7 @@ void InsnEmitter::Emit64() {
       L(Write(0, AddrExpr(1, false)));
       return;
     case ZYDIS_MNEMONIC_PUSH:
-      if (n == 2 && !IsImm(0)) {
+      if (d_.operand_width == 16 && !IsImm(0)) {
         L("const uint32_t v = " + Read(0) + ";");
         L("rsp -= 2; ::recomp::lift::Wr<uint16_t>(B, rsp, uint16_t(v));");
       } else {
@@ -2711,7 +2711,8 @@ void InsnEmitter::Emit() {
       return;
     case ZYDIS_MNEMONIC_PUSH: {
       L("const uint32_t v = " + Read(0, 4) + ";");
-      if (Bytes(0) == 2 && !IsImm(0)) {
+      // The operation size, not the operand's: push ss/ds/es/fs/gs moves esp by 4.
+      if (d_.operand_width == 16 && !IsImm(0)) {
         L("esp -= 2; ::recomp::lift::Wr<uint16_t>(B, esp, uint16_t(v));");
       } else {
         Push32("v");

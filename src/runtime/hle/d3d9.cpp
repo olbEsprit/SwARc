@@ -540,6 +540,11 @@ HLE_NAMED("d3d9.dll", "IDirect3D9::CheckDepthStencilMatch", D3D9_CheckDepthStenc
              : D3DERR_NOTAVAILABLE;
 }
 
+// (this, Adapter): the one monitor; user32's GetMonitorInfoA describes it.
+HLE_NAMED("d3d9.dll", "IDirect3D9::GetAdapterMonitor", D3D9_GetAdapterMonitor, 2) {
+  return Arg(c, 1) == 0 ? 0x00030001u : 0;
+}
+
 HLE_NAMED("d3d9.dll", "IDirect3D9::GetDeviceCaps", D3D9_GetDeviceCaps, 4) {
   if (Arg(c, 1) != 0 || Arg(c, 2) != 1) return D3DERR_INVALIDCALL;
   *G<D3DCAPS9>(Arg(c, 3)) = Caps();

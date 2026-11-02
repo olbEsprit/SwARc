@@ -2252,6 +2252,22 @@ HLE("user32.dll", EnumDisplaySettingsA, 3) {
   return 1;
 }
 
+// (hMonitor, lpmi): one monitor, the whole screen the game sees.
+HLE("user32.dll", GetMonitorInfoA, 2) {
+  uint32_t p = Arg(c, 1);
+  if (!p) return 0;
+  Wr32(p + 4, 0);
+  Wr32(p + 8, 0);
+  Wr32(p + 12, uint32_t(g_display_w));
+  Wr32(p + 16, uint32_t(g_display_h));
+  Wr32(p + 20, 0);
+  Wr32(p + 24, 0);
+  Wr32(p + 28, uint32_t(g_display_w));
+  Wr32(p + 32, uint32_t(g_display_h));
+  Wr32(p + 36, 1);  // MONITORINFOF_PRIMARY
+  return 1;
+}
+
 // Display modes are virtual: the host's mode never changes here. A mode
 // the game switches to becomes the screen it sees (GetSystemMetrics,
 // EnumDisplaySettings), as after a real switch; a window covering it goes

@@ -56,6 +56,7 @@ const guest::GUID kIID_IDirectSoundBuffer8 = {0x6825A449, 0x7524, 0x4D82, {0x92,
 const guest::GUID kIID_IDirectSound3DListener = {0x279AFA84, 0x4981, 0x11CE, {0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60}};
 const guest::GUID kIID_IDirectSound3DBuffer = {0x279AFA86, 0x4981, 0x11CE, {0xA5, 0x21, 0x00, 0x20, 0xAF, 0x0B, 0xE5, 0x60}};
 const guest::GUID kIID_IDirectSoundNotify = {0xB0210783, 0x89CD, 0x11D0, {0xAF, 0x08, 0x00, 0xA0, 0xC9, 0x25, 0xCD, 0x16}};
+const guest::GUID kCLSID_DirectSound8 = {0x3901CC3F, 0x84B5, 0x4FA4, {0xBA, 0x35, 0xAA, 0x81, 0x72, 0xB8, 0xA0, 0x9B}};
 
 audio::Mixer& M() { return audio::GetMixer(); }
 
@@ -225,6 +226,33 @@ uint32_t DirectSoundVtable() {
                       "VerifyCertification"});
 }
 
+uint32_t MakeDirectSound(uint32_t* out) {
+  if (!M().Open(48000)) return DSERR_NODRIVER;
+  *out = com::Publish(std::make_shared<DirectSound>(), DirectSoundVtable());
+  return DS_OK;
+}
+
+uint32_t CreateDirectSound(Ctx& c) {
+  if (!Arg(c, 1)) return DSERR_INVALIDPARAM;
+  Wr32(Arg(c, 1), 0);
+  if (Arg(c, 2)) return DSERR_NOAGGREGATION;
+  uint32_t ds;
+  uint32_t hr = MakeDirectSound(&ds);
+  if (hr == DS_OK) Wr32(Arg(c, 1), ds);
+  return hr;
+}
+
+uint32_t CreateDS8CoClass(uint32_t iid, uint32_t* out) {
+  if (!com::GuidEq(iid, kIID_IDirectSound8) && !com::GuidEq(iid, kIID_IDirectSound)) {
+    *out = 0;
+    return com::kE_NOINTERFACE;
+  }
+  *out = 0;
+  return MakeDirectSound(out);
+}
+
+com::CoClassRegistrar reg_dsound8{kCLSID_DirectSound8, &CreateDS8CoClass};
+
 uint32_t BufferVtable() {
   return com::Vtable("dsound.dll", "IDirectSoundBuffer8",
                      {"QueryInterface", "AddRef", "Release", "GetCaps", "GetCurrentPosition",
@@ -339,11 +367,39 @@ void WriteFormat(uint32_t va, uint32_t size, const Format& f) {
 
 // (lpcGuidDevice, ppDS8, pUnkOuter)
 HLE_NAMED("dsound.dll", "#11", DirectSoundCreate8, 3) {
-  if (!Arg(c, 1)) return DSERR_INVALIDPARAM;
-  Wr32(Arg(c, 1), 0);
-  if (Arg(c, 2)) return DSERR_NOAGGREGATION;
-  if (!M().Open(48000)) return DSERR_NODRIVER;
-  Wr32(Arg(c, 1), com::Publish(std::make_shared<DirectSound>(), DirectSoundVtable()));
+  return CreateDirectSound(c);
+}
+
+// (lpcGuidDevice, ppDS, pUnkOuter)
+HLE_NAMED("dsound.dll", "#1", DirectSoundCreate, 3) {
+  return CreateDirectSound(c);
+}
+
+// (lpDSEnumCallback, lpContext): the default device only.
+HLE_NAMED("dsound.dll", "#2", DirectSoundEnumerateA, 2) {
+  uint32_t cb = Arg(c, 0), ctx = Arg(c, 1);
+  if (!cb) return DS_OK;
+  uint32_t desc = HeapAllocProcess(32, true);
+  uint32_t mod = HeapAllocProcess(1, true);
+  PutStr(desc, "Primary Sound Driver");
+  CallGuest(c, cb, {0, desc, mod, ctx});
+  HeapFreeProcess(desc);
+  HeapFreeProcess(mod);
+  return DS_OK;
+}
+
+// (lpcGuidDevice, ppDSC, pUnkOuter): no capture device.
+HLE_NAMED("dsound.dll", "#6", DirectSoundCaptureCreate, 3) {
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 0);
+  return DSERR_NODRIVER;
+}
+
+// (lpDSEnumCallback, lpContext)
+HLE_NAMED("dsound.dll", "#7", DirectSoundCaptureEnumerateA, 2) { return DS_OK; }
+
+// (pGuidSrc, pGuidDest)
+HLE_NAMED("dsound.dll", "#9", GetDeviceID, 2) {
+  if (Arg(c, 0) && Arg(c, 1)) std::memcpy(GPtr(Arg(c, 1)), GPtr(Arg(c, 0)), 16);
   return DS_OK;
 }
 
@@ -385,6 +441,9 @@ HLE_NAMED("dsound.dll", "IDirectSound8::GetSpeakerConfig", DS8_GetSpeakerConfig,
   Wr32(Arg(c, 1), 4);  // DSSPEAKER_STEREO
   return DS_OK;
 }
+
+// (lpcGuidDevice)
+HLE_NAMED("dsound.dll", "IDirectSound8::Initialize", DS8_Initialize, 2) { return DS_OK; }
 
 // (pcDSBufferDesc, ppDSBuffer, pUnkOuter): DSBUFFERDESC {dwSize,
 // dwFlags, dwBufferBytes, dwReserved, lpwfxFormat, guid3DAlgorithm}.

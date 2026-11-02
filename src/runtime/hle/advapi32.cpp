@@ -58,7 +58,7 @@ void Seed() {
     for (size_t i = k.find('\\', k.find('\\') + 1); i != std::string::npos;
          i = k.find('\\', i + 1))
       g_reg[k.substr(0, i)];
-    g_reg[k][Lower(r.name)] = Str(r.value);
+    g_reg[k][Lower(r.name)] = r.data.empty() ? Str(r.value) : RegValue{r.type, r.data};
   }
 }
 
@@ -127,17 +127,25 @@ std::string Join(const std::string& base, const std::string& sub) {
   return s.empty() ? base : base + "\\" + s;
 }
 
-HLE("advapi32.dll", RegOpenKeyExA, 5) {
+uint32_t OpenKey(uint32_t hkey, uint32_t subkey, uint32_t out) {
   std::lock_guard<std::mutex> l(g_reg_mu);
   LoadOnce();
-  std::string base = RootName(Arg(c, 0));
+  std::string base = RootName(hkey);
   if (base.empty()) return kErrorInvalidHandle;
-  std::string path = Join(base, GStr(Arg(c, 1)));
+  std::string path = Join(base, GStr(subkey));
   if (!g_reg.count(path)) return kErrorFileNotFound;
   uint32_t h = g_next_hkey += 4;
   g_open[h] = path;
-  Wr32(Arg(c, 4), h);
+  Wr32(out, h);
   return kErrorSuccess;
+}
+
+HLE("advapi32.dll", RegOpenKeyExA, 5) {
+  return OpenKey(Arg(c, 0), Arg(c, 1), Arg(c, 4));
+}
+
+HLE("advapi32.dll", RegOpenKeyA, 3) {
+  return OpenKey(Arg(c, 0), Arg(c, 1), Arg(c, 2));
 }
 
 HLE("advapi32.dll", RegCreateKeyExA, 9) {

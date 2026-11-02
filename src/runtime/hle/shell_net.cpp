@@ -59,6 +59,18 @@ HLE_NAMED("shell32.dll", "SHGetFolderPathA", Shell32GetFolderPathA, 5) {
   return GetFolderPathA(c);
 }
 
+HLE("shell32.dll", SHGetSpecialFolderPathA, 4) {
+  uint32_t csidl = Arg(c, 2), out = Arg(c, 1);
+  std::string p = FolderFor(csidl);
+  if (p.empty()) {
+    WarnF("SHGetSpecialFolderPathA(CSIDL %X): unknown folder\n", csidl);
+    return 0;
+  }
+  MakeDirs(HostPath(p));
+  PutStr(out, p);
+  return 1;
+}
+
 HLE("shfolder.dll", SHGetFolderPathW, 5) {
   uint32_t csidl = Arg(c, 1), out = Arg(c, 4);
   std::string p = FolderFor(csidl);
