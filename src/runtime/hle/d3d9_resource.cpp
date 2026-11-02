@@ -31,6 +31,10 @@ constexpr GUID kIID_IDirect3DTexture9 = {0x85C31227, 0x3DE5, 0x4F00, {0x9B, 0x3A
 constexpr GUID kIID_IDirect3DCubeTexture9 = {0xFFF32F81, 0xD953, 0x473A, {0x92, 0x23, 0x93, 0xD6, 0x52, 0xAB, 0xA9, 0x3F}};
 constexpr GUID kIID_IDirect3DVertexBuffer9 = {0xB64BB1B5, 0xFD70, 0x4DF6, {0xBF, 0x91, 0x19, 0xD0, 0xA1, 0x24, 0x55, 0xE3}};
 constexpr GUID kIID_IDirect3DIndexBuffer9 = {0x7C9DD65E, 0xD3F7, 0x4529, {0xAC, 0xEE, 0x78, 0x58, 0x30, 0xAC, 0xDE, 0x35}};
+constexpr GUID kIID_IDirect3DVertexShader9 = {0xEFC5557E, 0x6265, 0x4613, {0x8A, 0x94, 0x43, 0x85, 0x78, 0x89, 0xEB, 0x36}};
+constexpr GUID kIID_IDirect3DPixelShader9 = {0x6D3BDBDC, 0x5B02, 0x4415, {0xB8, 0x52, 0xCE, 0x5E, 0x8B, 0xCC, 0xB2, 0x89}};
+constexpr GUID kIID_IDirect3DVertexDeclaration9 = {0xDD13C59C, 0x36FA, 0x4098, {0xA8, 0xFB, 0xC7, 0xED, 0x39, 0xDC, 0x85, 0x46}};
+constexpr GUID kIID_IDirect3DQuery9 = {0xD9771460, 0xA695, 0x4F26, {0xBB, 0xD3, 0x27, 0xB8, 0x40, 0xB5, 0x41, 0xCC}};
 
 // D3DQUERYTYPE
 constexpr uint32_t D3DQUERYTYPE_EVENT = 8;
@@ -741,6 +745,9 @@ HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetType", D3DSurf9_GetType, 1) { retur
 HLE_NAMED("d3d9.dll", "IDirect3DSurface9::SetPriority", D3DSurf9_SetPriority, 2) { return 0; }
 HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetPriority", D3DSurf9_GetPriority, 1) { return 0; }
 HLE_NAMED("d3d9.dll", "IDirect3DSurface9::PreLoad", D3DSurf9_PreLoad, 1) { return 0; }
+HLE_NAMED("d3d9.dll", "IDirect3DSurface9::SetPrivateData", D3DSurf9_SetPrivateData, 5) { return D3D_OK; }
+HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetPrivateData", D3DSurf9_GetPrivateData, 4) { return D3DERR_NOTFOUND; }
+HLE_NAMED("d3d9.dll", "IDirect3DSurface9::FreePrivateData", D3DSurf9_FreePrivateData, 2) { return D3D_OK; }
 
 HLE_NAMED("d3d9.dll", "IDirect3DSurface9::GetDesc", D3DSurf9_GetDesc, 2) {
   *G<D3DSURFACE_DESC>(Arg(c, 1)) = Surf(c)->desc;
@@ -965,8 +972,14 @@ HLE_NAMED("d3d9.dll", "IDirect3DIndexBuffer9::GetDesc", D3DIB9_GetDesc, 2) {
 
 // ---- vertex declarations, shaders, queries --------------------------------------------
 
+HLE_NAMED("d3d9.dll", "IDirect3DVertexDeclaration9::QueryInterface", D3DDecl9_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirect3DVertexDeclaration9);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DVertexDeclaration9::AddRef", D3DDecl9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("d3d9.dll", "IDirect3DVertexDeclaration9::Release", D3DDecl9_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DVertexDeclaration9::GetDevice", D3DDecl9_GetDevice, 2) {
+  return GetDeviceOf(c, Obj<VertexDecl>(c, "IDirect3DVertexDeclaration9")->device);
+}
 
 // (pElement, pNumElements): the count includes D3DDECL_END.
 HLE_NAMED("d3d9.dll", "IDirect3DVertexDeclaration9::GetDeclaration", D3DDecl9_GetDeclaration, 3) {
@@ -989,19 +1002,37 @@ uint32_t GetFunction(Ctx& c, const char* iface) {
   return D3D_OK;
 }
 
+HLE_NAMED("d3d9.dll", "IDirect3DVertexShader9::QueryInterface", D3DVS9_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirect3DVertexShader9);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DVertexShader9::AddRef", D3DVS9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("d3d9.dll", "IDirect3DVertexShader9::Release", D3DVS9_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DVertexShader9::GetDevice", D3DVS9_GetDevice, 2) {
+  return GetDeviceOf(c, Obj<Shader>(c, "IDirect3DVertexShader9")->device);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DVertexShader9::GetFunction", D3DVS9_GetFunction, 3) {
   return GetFunction(c, "IDirect3DVertexShader9");
 }
+HLE_NAMED("d3d9.dll", "IDirect3DPixelShader9::QueryInterface", D3DPS9_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirect3DPixelShader9);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DPixelShader9::AddRef", D3DPS9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("d3d9.dll", "IDirect3DPixelShader9::Release", D3DPS9_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DPixelShader9::GetDevice", D3DPS9_GetDevice, 2) {
+  return GetDeviceOf(c, Obj<Shader>(c, "IDirect3DPixelShader9")->device);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DPixelShader9::GetFunction", D3DPS9_GetFunction, 3) {
   return GetFunction(c, "IDirect3DPixelShader9");
 }
 
+HLE_NAMED("d3d9.dll", "IDirect3DQuery9::QueryInterface", D3DQuery9_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirect3DQuery9);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::AddRef", D3DQuery9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::Release", D3DQuery9_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetDevice", D3DQuery9_GetDevice, 2) {
+  return GetDeviceOf(c, Obj<Query>(c, "IDirect3DQuery9")->device);
+}
 HLE_NAMED("d3d9.dll", "IDirect3DQuery9::GetType", D3DQuery9_GetType, 1) {
   return Obj<Query>(c, "IDirect3DQuery9")->type;
 }

@@ -129,6 +129,19 @@ void SyncFixedFunction(Device& d) {
     auto it = d.transforms.find(d3d9);
     d.gfx->SetTransform(d3d7, it != d.transforms.end() ? it->second.data() : kIdentity);
   }
+  gfx::Material gm{};
+  static_assert(sizeof gm == sizeof d.material);
+  std::memcpy(&gm, &d.material, sizeof gm);
+  d.gfx->SetMaterial(gm);
+  for (const auto& [index, light] : d.lights) {
+    gfx::Light gl;
+    static_assert(sizeof gl == sizeof light);
+    std::memcpy(&gl, &light, sizeof gl);
+    d.gfx->SetLight(index, gl);
+    auto it = d.light_on.find(index);
+    d.gfx->LightEnable(index, it != d.light_on.end() && it->second);
+  }
+  for (uint32_t i = 0; i < 6; i++) d.gfx->SetClipPlane(i, d.clip_planes[i]);
 }
 
 // A draw without shaders: stream 0 with the FVF.

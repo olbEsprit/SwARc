@@ -176,6 +176,11 @@ struct Device : com::Object {
   uint32_t fvf = 0;
   guest::BOOL software_vp = 0;
   std::map<uint32_t, std::array<float, 16>> transforms;
+  guest::D3DMATERIAL9 material{};
+  std::map<uint32_t, guest::D3DLIGHT9> lights;
+  std::map<uint32_t, bool> light_on;
+  float clip_planes[6][4] = {};
+  float npatch = 0.0f;
   guest::D3DVIEWPORT9 viewport{};
   guest::D3DRECT scissor{};
   float vs_f[256][4] = {}, ps_f[224][4] = {};

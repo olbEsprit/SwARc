@@ -11,6 +11,7 @@
 // d3d7.cpp). We do the same to the guest FPU and log it.
 
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -807,6 +808,126 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetTransform", D3DDev9_GetTransform, 3)
   else
     m[0] = m[5] = m[10] = m[15] = 1.0f;
   std::memcpy(GPtr(Arg(c, 2)), m.data(), sizeof m);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::MultiplyTransform", D3DDev9_MultiplyTransform, 3) {
+  Device* d = Dev(c);
+  std::array<float, 16> a{};
+  auto it = d->transforms.find(Arg(c, 1));
+  if (it != d->transforms.end())
+    a = it->second;
+  else
+    a[0] = a[5] = a[10] = a[15] = 1.0f;
+  std::array<float, 16> b;
+  std::memcpy(b.data(), GPtr(Arg(c, 2)), sizeof b);
+  // pMatrix times State, as D3D7 does.
+  std::array<float, 16> r{};
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+      for (int k = 0; k < 4; k++) r[4 * i + j] += b[4 * i + k] * a[4 * k + j];
+  d->transforms[Arg(c, 1)] = r;
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetMaterial", D3DDev9_SetMaterial, 2) {
+  Dev(c)->material = *G<guest::D3DMATERIAL9>(Arg(c, 1));
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetMaterial", D3DDev9_GetMaterial, 2) {
+  *G<guest::D3DMATERIAL9>(Arg(c, 1)) = Dev(c)->material;
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetLight", D3DDev9_SetLight, 3) {
+  Device* d = Dev(c);
+  d->lights[Arg(c, 1)] = *G<guest::D3DLIGHT9>(Arg(c, 2));
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetLight", D3DDev9_GetLight, 3) {
+  Device* d = Dev(c);
+  auto it = d->lights.find(Arg(c, 1));
+  if (it == d->lights.end()) return D3DERR_INVALIDCALL;
+  *G<guest::D3DLIGHT9>(Arg(c, 2)) = it->second;
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::LightEnable", D3DDev9_LightEnable, 3) {
+  Device* d = Dev(c);
+  uint32_t i = Arg(c, 1);
+  if (d->lights.find(i) == d->lights.end()) {
+    guest::D3DLIGHT9 l{};
+    l.Type = 1;  // D3DLIGHT_DIRECTIONAL
+    l.Diffuse = {1.0f, 1.0f, 1.0f, 0.0f};
+    l.Direction = {0.0f, 0.0f, 1.0f};
+    d->lights[i] = l;
+  }
+  d->light_on[i] = Arg(c, 2) != 0;
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetLightEnable", D3DDev9_GetLightEnable, 3) {
+  Device* d = Dev(c);
+  if (d->lights.find(Arg(c, 1)) == d->lights.end()) return D3DERR_INVALIDCALL;
+  auto it = d->light_on.find(Arg(c, 1));
+  Wr32(Arg(c, 2), it != d->light_on.end() && it->second ? 1 : 0);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetClipPlane", D3DDev9_SetClipPlane, 3) {
+  uint32_t i = Arg(c, 1);
+  if (i >= 6) return D3DERR_INVALIDCALL;
+  std::memcpy(Dev(c)->clip_planes[i], GPtr(Arg(c, 2)), 16);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetClipPlane", D3DDev9_GetClipPlane, 3) {
+  uint32_t i = Arg(c, 1);
+  if (i >= 6) return D3DERR_INVALIDCALL;
+  std::memcpy(GPtr(Arg(c, 2)), Dev(c)->clip_planes[i], 16);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::ValidateDevice", D3DDev9_ValidateDevice, 2) {
+  Wr32(Arg(c, 1), 1);
+  return D3D_OK;
+}
+
+// (iSwapChain, Flags, pRamp)
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetGammaRamp", D3DDev9_SetGammaRamp, 4) {
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetGammaRamp", D3DDev9_GetGammaRamp, 3) {
+  auto* p = reinterpret_cast<uint16_t*>(GPtr(Arg(c, 2)));
+  for (uint32_t i = 0; i < 256; i++)
+    p[i] = p[256 + i] = p[512 + i] = uint16_t(i * 257);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetClipStatus", D3DDev9_SetClipStatus, 2) {
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetClipStatus", D3DDev9_GetClipStatus, 2) {
+  Wr32(Arg(c, 1), 0);
+  Wr32(Arg(c, 1) + 4, 0);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetNPatchMode", D3DDev9_SetNPatchMode, 2) {
+  Dev(c)->npatch = std::bit_cast<float>(uint32_t(Arg(c, 1)));
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetNPatchMode", D3DDev9_GetNPatchMode, 1) {
+  x87::LoadF32(c.fpu, std::bit_cast<uint32_t>(Dev(c)->npatch));
+  return 0;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetDialogBoxMode", D3DDev9_SetDialogBoxMode, 2) {
   return D3D_OK;
 }
 
