@@ -184,6 +184,9 @@ struct Device : com::Object {
   guest::D3DPRESENT_PARAMETERS pp{};
   uint32_t hwnd = 0;
   std::unique_ptr<gfx::Device> gfx;
+  // Pixel shaders generated for a vertex shader and the fixed-function
+  // pixel stage, by source (never published to the guest).
+  std::map<std::string, std::shared_ptr<Shader>> ff_pixel;
   std::shared_ptr<Surface> backbuffer, auto_depth;
   // Bound objects: guest pointers the device holds a reference to.
   uint32_t render_targets[4] = {};

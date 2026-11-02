@@ -6,12 +6,16 @@
 // registers and samplers are passed as they are. Draws without shaders
 // use gfx::Device's fixed-function pipeline (D3D7 semantics) with the
 // D3D9 state in its terms: sampler states at D3D7's texture-stage
-// positions, D3D9's transform numbers mapped. Mixing a shader with the
-// fixed-function pipeline and fixed-function draws with a vertex
-// declaration (no FVF) are not supported yet (fatal, named).
+// positions, D3D9's transform numbers mapped. A vertex shader with no pixel
+// shader gets a pixel shader generated from the texture-stage state; a
+// pixel shader without a vertex shader and fixed-function draws with a
+// vertex declaration (no FVF) are not supported yet (fatal, named).
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
 #include <vector>
 
 #include "runtime/hle/d3d9_impl.h"
@@ -180,6 +184,183 @@ void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
               sd.indices ? idx.data() : nullptr, ni);
 }
 
+// The pixel shader for a draw with `vs` and no pixel shader: the texture-
+// stage cascade as straight-line code (ff.frag's Arg and Op maths), reading
+// only the varyings `vs` writes.
+std::string FixedFunctionPixelSource(const Device& d, const hlsl::Program& vs) {
+  auto has = [&](uint32_t usage, uint32_t index) {
+    return std::find(vs.varyings.begin(), vs.varyings.end(), hlsl::Semantic{usage, index}) !=
+           vs.varyings.end();
+  };
+  auto f = [](float v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.9g", v);
+    std::string s = b;
+    if (s.find_first_of(".eE") == std::string::npos) s += ".0";
+    return s;
+  };
+  bool uses_spec = false, uses_tfactor = false, uses_splat = false;
+  std::set<uint32_t> texcoords;
+  auto arg = [&](uint32_t a) {
+    std::string v;
+    switch (a & 0xF) {
+      case 0: v = "diff"; break;
+      case 1: v = "cur"; break;
+      case 2: v = "tex"; break;
+      case 3: uses_tfactor = true; v = "tfactor"; break;
+      case 4: uses_spec = true; v = "spec"; break;
+      case 5: v = "temp"; break;
+      default: v = "float4(0.0, 0.0, 0.0, 0.0)"; break;
+    }
+    if (a & 0x20) v = "float4(" + v + ".a, " + v + ".a, " + v + ".a, " + v + ".a)";
+    if (a & 0x10) v = "1.0 - (" + v + ")";
+    return v;
+  };
+  auto mask = [](uint32_t op) {
+    if (op == 2) return 1;
+    if (op == 3) return 2;
+    if (op == 17 || op == 22 || op == 23) return 1;
+    if (op == 25 || op == 26) return 7;
+    return 3;
+  };
+  auto op = [&](uint32_t o, const std::string& a1, const std::string& a2,
+                const std::string& a0) {
+    switch (o) {
+      case 2: return a1;
+      case 3: return a2;
+      case 4: return a1 + " * " + a2;
+      case 5: return a1 + " * " + a2 + " * 2.0";
+      case 6: return a1 + " * " + a2 + " * 4.0";
+      case 7: return a1 + " + " + a2;
+      case 8: return a1 + " + " + a2 + " - 0.5";
+      case 9: return "(" + a1 + " + " + a2 + " - 0.5) * 2.0";
+      case 10: return a1 + " - " + a2;
+      case 11: return a1 + " + " + a2 + " - " + a1 + " * " + a2;
+      case 12: return "lerp(" + a2 + ", " + a1 + ", diff.a)";
+      case 13: return "lerp(" + a2 + ", " + a1 + ", tex.a)";
+      case 14: uses_tfactor = true; return "lerp(" + a2 + ", " + a1 + ", tfactor.a)";
+      case 15: return a1 + " + " + a2 + " * (1.0 - tex.a)";
+      case 16: return "lerp(" + a2 + ", " + a1 + ", cur.a)";
+      case 17: return a1;
+      case 18: return "float4(" + a1 + ".rgb + " + a1 + ".a * " + a2 + ".rgb, " + a1 + ".a)";
+      case 19: return "float4(" + a1 + ".rgb * " + a2 + ".rgb + " + a1 + ".a, " + a1 + ".a)";
+      case 20:
+        return "float4((1.0 - " + a1 + ".a) * " + a2 + ".rgb + " + a1 + ".rgb, " + a1 + ".a)";
+      case 21:
+        return "float4((1.0 - " + a1 + ".rgb) * " + a2 + ".rgb + " + a1 + ".a, " + a1 + ".a)";
+      case 24:
+        uses_splat = true;
+        return "ff_splat(saturate(4.0 * dot(" + a1 + ".rgb - 0.5, " + a2 + ".rgb - 0.5)))";
+      case 25: return a0 + " + " + a1 + " * " + a2;
+      case 26: return "lerp(" + a2 + ", " + a1 + ", " + a0 + ")";
+      default: return a1;
+    }
+  };
+  auto sample = [&](uint32_t s, const Texture& t) {
+    uint32_t k = d.tss[s][11] & 0xFFFF;
+    std::string coord = "float4(0.0, 0.0, 0.0, 0.0)";
+    if (has(hlsl::kTexcoord, k)) {
+      coord = "v_texcoord" + std::to_string(k);
+      texcoords.insert(k);
+    }
+    bool proj = d.tss[s][24] & 0x100;
+    std::string sn = "s" + std::to_string(s);
+    if (t.cube)
+      return proj ? "texCUBEproj(" + sn + ", " + coord + ")"
+                  : "texCUBE(" + sn + ", (" + coord + ").xyz)";
+    return proj ? "tex2Dproj(" + sn + ", " + coord + ")"
+                : "tex2D(" + sn + ", (" + coord + ").xy)";
+  };
+
+  std::string samplers, body;
+  for (uint32_t s = 0; s < 8; s++) {
+    uint32_t cop = d.tss[s][1];
+    if (cop == 1) break;  // DISABLE ends the cascade
+    body += "  {\n";
+    auto* t = com::As<Texture>(d.textures[s]);
+    if (t) {
+      samplers += std::string(t->cube ? "samplerCUBE " : "sampler2D ") + "s" +
+                  std::to_string(s) + " : register(s" + std::to_string(s) + ");\n";
+      body += "    float4 tex = " + sample(s, *t) + ";\n";
+    } else {
+      body += "    float4 tex = float4(0.0, 0.0, 0.0, 1.0);\n";
+    }
+    uint32_t m = mask(cop);
+    if (m & 1) body += "    float4 c1 = " + arg(d.tss[s][2]) + ";\n";
+    if (m & 2) body += "    float4 c2 = " + arg(d.tss[s][3]) + ";\n";
+    if (m & 4) body += "    float4 c0 = " + arg(d.tss[s][26]) + ";\n";
+    body += "    float3 rgb = saturate((" + op(cop, "c1", "c2", "c0") + ").rgb);\n";
+    body += "    float al = cur.a;\n";
+    uint32_t aop = d.tss[s][4];
+    if (aop != 1) {
+      uint32_t am = mask(aop);
+      if (am & 1) body += "    float4 d1 = " + arg(d.tss[s][5]) + ";\n";
+      if (am & 2) body += "    float4 d2 = " + arg(d.tss[s][6]) + ";\n";
+      if (am & 4) body += "    float4 d0 = " + arg(d.tss[s][27]) + ";\n";
+      body += "    al = saturate((" + op(aop, "d1", "d2", "d0") + ").a);\n";
+    }
+    if (cop == 24) body += "    al = rgb.r;\n";  // DOTPRODUCT3 replicates into alpha
+    if (d.tss[s][28] == 5)
+      body += "    temp = float4(rgb, al);\n";
+    else
+      body += "    cur = float4(rgb, al);\n";
+    body += "  }\n";
+  }
+  if (d.rs[29]) {
+    uses_spec = true;
+    body += "  cur.rgb = saturate(cur.rgb + spec.rgb);\n";
+  }
+
+  bool has_diff = has(hlsl::kColor, 0), has_spec = has(hlsl::kColor, 1);
+  std::string params;
+  auto param = [&](const std::string& name, const std::string& sem) {
+    if (!params.empty()) params += ", ";
+    params += "float4 " + name + " : " + sem;
+  };
+  if (has_diff) param("v_color0", "COLOR0");
+  if (uses_spec && has_spec) param("v_color1", "COLOR1");
+  for (uint32_t k : texcoords) {
+    param("v_texcoord" + std::to_string(k), "TEXCOORD" + std::to_string(k));
+  }
+
+  std::string src = samplers.empty() ? "" : samplers + "\n";
+  if (uses_splat) src += "float4 ff_splat(float x) { return float4(x, x, x, x); }\n\n";
+  src += "float4 main(" + params + ") : COLOR0 {\n";
+  src += has_diff ? "  float4 diff = v_color0;\n"
+                  : "  float4 diff = float4(1.0, 1.0, 1.0, 1.0);\n";
+  if (uses_spec)
+    src += has_spec ? "  float4 spec = v_color1;\n"
+                    : "  float4 spec = float4(0.0, 0.0, 0.0, 0.0);\n";
+  if (uses_tfactor) {
+    uint32_t tf = d.rs[60];
+    src += "  float4 tfactor = float4(" + f((tf >> 16 & 0xFF) / 255.0f) + ", " +
+           f((tf >> 8 & 0xFF) / 255.0f) + ", " + f((tf & 0xFF) / 255.0f) + ", " +
+           f((tf >> 24 & 0xFF) / 255.0f) + ");\n";
+  }
+  src += "  float4 cur = diff;\n  float4 temp = float4(0.0, 0.0, 0.0, 0.0);\n";
+  src += body + "  return cur;\n}\n";
+  return src;
+}
+
+// The generated pixel shader for this state, created on first use and kept
+// in the device (each source is one gfx shader).
+Shader* FixedFunctionPixel(Device& d, const Shader& vs) {
+  std::string source = FixedFunctionPixelSource(d, *vs.program);
+  auto it = d.ff_pixel.find(source);
+  if (it != d.ff_pixel.end()) return it->second.get();
+  auto program = std::make_shared<hlsl::Program>();
+  std::string errors;
+  if (!hlsl::Compile(source, {}, "main", "ps_3_0", 0, program.get(), &errors))
+    FatalF("d3d9: the generated fixed-function pixel shader does not compile:\n%s\n%s",
+           errors.c_str(), source.c_str());
+  auto s = std::make_shared<Shader>();
+  s->device = d.guest;
+  s->pixel = true;
+  s->program = std::move(program);
+  s->id = d.gfx->CreateShader(*s->program);
+  return d.ff_pixel.emplace(std::move(source), std::move(s)).first->second.get();
+}
+
 // Completes `sd` (primitive, counts, and any streams already given) from
 // the device's bindings and draws it.
 void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
@@ -189,9 +370,10 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
     DrawFixed(d, sd, what);
     return;
   }
-  if (!vs || !ps)
-    FatalF("d3d9: %s with a %s shader and the fixed-function %s stage is not supported yet",
-           what, vs ? "vertex" : "pixel", vs ? "pixel" : "vertex");
+  if (!vs)
+    FatalF("d3d9: %s with a pixel shader and the fixed-function vertex stage is not supported yet",
+           what);
+  if (!ps) ps = FixedFunctionPixel(d, *vs);
 
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;
