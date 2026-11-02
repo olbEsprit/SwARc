@@ -564,6 +564,12 @@ HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::QueryInterface", DSB8_QueryInterfa
 HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::AddRef", DSB8_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
 HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::Release", DSB8_Release, 1) { return com::Release(Arg(c, 0)); }
 
+// (dwFlags, dwEffectsCount, pdwResultCodes): buffers carry no effects (SetFX), nothing to place.
+HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::AcquireResources", DSB8_AcquireResources, 4) {
+  for (uint32_t i = 0; i < Arg(c, 2) && Arg(c, 3); i++) Wr32(Arg(c, 3) + 4 * i, 0);
+  return 0;
+}
+
 // (pDSBufferCaps): DSBCAPS {dwSize, dwFlags, dwBufferBytes,
 // dwUnlockTransferRate, dwPlayCpuOverhead}.
 HLE_NAMED("dsound.dll", "IDirectSoundBuffer8::GetCaps", DSB8_GetCaps, 2) {
