@@ -86,6 +86,7 @@ using namespace guest;
 constexpr GUID kIID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 constexpr GUID kIID_IDirect3D9 = {0x81BDCBCA, 0x64D4, 0x426D, {0xAE, 0x8D, 0xAD, 0x01, 0x47, 0xF4, 0x27, 0x5C}};
 constexpr GUID kIID_IDirect3DDevice9 = {0xD0223B96, 0xBF7A, 0x43FD, {0x92, 0xBD, 0xA4, 0x3B, 0x0D, 0x82, 0xB9, 0xEB}};
+constexpr GUID kIID_IDirect3DStateBlock9 = {0xB07C4FE5, 0x310D, 0x4BA8, {0xA2, 0x3C, 0x4F, 0x0F, 0x20, 0x6F, 0x21, 0x8B}};
 
 constexpr uint32_t D3DCREATE_FPU_PRESERVE = 0x2;
 constexpr uint32_t D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
@@ -243,6 +244,12 @@ uint32_t DeviceVtable() {
        "DrawTriPatch", "DeletePatch", "CreateQuery"});
 }
 
+uint32_t StateBlockVtable() {
+  return com::Vtable("d3d9.dll", "IDirect3DStateBlock9",
+                     {"QueryInterface", "AddRef", "Release", "GetDevice",
+                      "Capture", "Apply"});
+}
+
 Device* Dev(Ctx& c) { return DeviceOf(hle::Arg(c, 0)); }
 
 // Default render, sampler and texture stage states (D3D9 docs).
@@ -382,9 +389,99 @@ void UnbindAll(Device& d) {
   Bind(&d.ps, 0);
 }
 
+DeviceState Snapshot(const Device& d) {
+  DeviceState s;
+  std::memcpy(s.textures, d.textures, sizeof s.textures);
+  std::memcpy(s.streams, d.streams, sizeof s.streams);
+  s.indices = d.indices;
+  s.decl = d.decl;
+  s.vs = d.vs;
+  s.ps = d.ps;
+  std::memcpy(s.rs, d.rs, sizeof s.rs);
+  std::memcpy(s.ss, d.ss, sizeof s.ss);
+  std::memcpy(s.tss, d.tss, sizeof s.tss);
+  s.fvf = d.fvf;
+  s.transforms = d.transforms;
+  s.viewport = d.viewport;
+  s.scissor = d.scissor;
+  std::memcpy(s.vs_f, d.vs_f, sizeof s.vs_f);
+  std::memcpy(s.ps_f, d.ps_f, sizeof s.ps_f);
+  std::memcpy(s.vs_i, d.vs_i, sizeof s.vs_i);
+  std::memcpy(s.ps_i, d.ps_i, sizeof s.ps_i);
+  std::memcpy(s.vs_b, d.vs_b, sizeof s.vs_b);
+  std::memcpy(s.ps_b, d.ps_b, sizeof s.ps_b);
+  return s;
+}
+
+void ReleaseBound(DeviceState& s) {
+  for (uint32_t& t : s.textures) Bind(&t, 0);
+  for (DeviceState::Stream& st : s.streams) Bind(&st.buffer, 0);
+  Bind(&s.indices, 0);
+  Bind(&s.decl, 0);
+  Bind(&s.vs, 0);
+  Bind(&s.ps, 0);
+}
+
+void CaptureState(DeviceState& s, const Device& d) {
+  ReleaseBound(s);
+  s = Snapshot(d);
+  for (uint32_t t : s.textures)
+    if (t) com::AddRef(t);
+  for (const DeviceState::Stream& st : s.streams)
+    if (st.buffer) com::AddRef(st.buffer);
+  if (s.indices) com::AddRef(s.indices);
+  if (s.decl) com::AddRef(s.decl);
+  if (s.vs) com::AddRef(s.vs);
+  if (s.ps) com::AddRef(s.ps);
+}
+
+void ApplyState(Device& d, const DeviceState& s) {
+  for (int i = 0; i < 20; i++) Bind(&d.textures[i], s.textures[i]);
+  for (int i = 0; i < 16; i++) {
+    Bind(&d.streams[i].buffer, s.streams[i].buffer);
+    d.streams[i].offset = s.streams[i].offset;
+    d.streams[i].stride = s.streams[i].stride;
+    d.streams[i].freq = s.streams[i].freq;
+  }
+  Bind(&d.indices, s.indices);
+  Bind(&d.decl, s.decl);
+  Bind(&d.vs, s.vs);
+  Bind(&d.ps, s.ps);
+  std::memcpy(d.rs, s.rs, sizeof d.rs);
+  std::memcpy(d.ss, s.ss, sizeof d.ss);
+  std::memcpy(d.tss, s.tss, sizeof d.tss);
+  d.fvf = s.fvf;
+  d.transforms = s.transforms;
+  d.viewport = s.viewport;
+  d.scissor = s.scissor;
+  std::memcpy(d.vs_f, s.vs_f, sizeof d.vs_f);
+  std::memcpy(d.ps_f, s.ps_f, sizeof d.ps_f);
+  std::memcpy(d.vs_i, s.vs_i, sizeof d.vs_i);
+  std::memcpy(d.ps_i, s.ps_i, sizeof d.ps_i);
+  std::memcpy(d.vs_b, s.vs_b, sizeof d.vs_b);
+  std::memcpy(d.ps_b, s.ps_b, sizeof d.ps_b);
+  d.synced = false;  // the next SyncState sends every render state
+}
+
+uint32_t NewStateBlock(Device& d, uint32_t device, uint32_t out) {
+  auto sb = std::make_shared<StateBlock>();
+  sb->device = device;
+  CaptureState(sb->state, d);
+  Wr32(out, com::Publish(sb, StateBlockVtable()));
+  return D3D_OK;
+}
+
+StateBlock* SB(Ctx& c) {
+  StateBlock* s = com::As<StateBlock>(hle::Arg(c, 0));
+  if (!s) FatalF("IDirect3DStateBlock9 call on unknown object %08X", uint32_t(hle::Arg(c, 0)));
+  return s;
+}
+
 int g_perf_level = 0;
 
 }  // namespace
+
+StateBlock::~StateBlock() { ReleaseBound(state); }
 
 uint32_t QueryInterfaceFor(Ctx& c, const guest::GUID& iid) {
   if (com::GuidEq(hle::Arg(c, 1), iid) || com::GuidEq(hle::Arg(c, 1), kIID_IUnknown)) {
@@ -604,6 +701,10 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::Release", D3DDev9_Release, 1) {
   // Last reference: what is bound, the implicit surfaces and the
   // IDirect3D9 go with it.
   uint32_t d3d = d->d3d;
+  if (d->recording_from) {
+    ReleaseBound(*d->recording_from);
+    d->recording_from.reset();
+  }
   UnbindAll(*d);
   for (uint32_t& rt : d->render_targets) Bind(&rt, 0);
   Bind(&d->depth_stencil, 0);
@@ -874,6 +975,35 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetScissorRect", D3DDev9_GetScissorRect
   return D3D_OK;
 }
 
+// Every type (ALL, PIXELSTATE, VERTEXSTATE) captures the whole state.
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::CreateStateBlock", D3DDev9_CreateStateBlock, 3) {
+  uint32_t type = Arg(c, 1), out = Arg(c, 2);
+  if (type < 1 || type > 3 || !out) return D3DERR_INVALIDCALL;
+  return NewStateBlock(*Dev(c), Arg(c, 0), out);
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::BeginStateBlock", D3DDev9_BeginStateBlock, 1) {
+  Device* d = Dev(c);
+  if (d->recording_from) return D3DERR_INVALIDCALL;
+  d->recording_from.emplace();
+  CaptureState(*d->recording_from, *d);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DDevice9::EndStateBlock", D3DDev9_EndStateBlock, 2) {
+  Device* d = Dev(c);
+  uint32_t out = Arg(c, 1);
+  if (!d->recording_from || !out) return D3DERR_INVALIDCALL;
+  auto sb = std::make_shared<StateBlock>();
+  sb->device = Arg(c, 0);
+  CaptureState(sb->state, *d);
+  ApplyState(*d, *d->recording_from);
+  ReleaseBound(*d->recording_from);
+  d->recording_from.reset();
+  Wr32(out, com::Publish(sb, StateBlockVtable()));
+  return D3D_OK;
+}
+
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetSoftwareVertexProcessing", D3DDev9_SetSoftwareVertexProcessing, 2) {
   Dev(c)->software_vp = BOOL(Arg(c, 1));
   return D3D_OK;
@@ -891,6 +1021,32 @@ HLE_NAMED("d3d9.dll", "IDirect3DDevice9::SetFVF", D3DDev9_SetFVF, 2) {
 
 HLE_NAMED("d3d9.dll", "IDirect3DDevice9::GetFVF", D3DDev9_GetFVF, 2) {
   Wr32(Arg(c, 1), Dev(c)->fvf);
+  return D3D_OK;
+}
+
+// ---- IDirect3DStateBlock9 -----------------------------------------------------------
+
+HLE_NAMED("d3d9.dll", "IDirect3DStateBlock9::QueryInterface", D3DSB9_QueryInterface, 3) {
+  return QueryInterfaceFor(c, kIID_IDirect3DStateBlock9);
+}
+HLE_NAMED("d3d9.dll", "IDirect3DStateBlock9::AddRef", D3DSB9_AddRef, 1) { return com::AddRef(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DStateBlock9::Release", D3DSB9_Release, 1) { return com::Release(Arg(c, 0)); }
+HLE_NAMED("d3d9.dll", "IDirect3DStateBlock9::GetDevice", D3DSB9_GetDevice, 2) {
+  uint32_t device = SB(c)->device;
+  com::AddRef(device);
+  Wr32(Arg(c, 1), device);
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DStateBlock9::Capture", D3DSB9_Capture, 1) {
+  StateBlock* sb = SB(c);
+  CaptureState(sb->state, *DeviceOf(sb->device));
+  return D3D_OK;
+}
+
+HLE_NAMED("d3d9.dll", "IDirect3DStateBlock9::Apply", D3DSB9_Apply, 1) {
+  StateBlock* sb = SB(c);
+  ApplyState(*DeviceOf(sb->device), sb->state);
   return D3D_OK;
 }
 
