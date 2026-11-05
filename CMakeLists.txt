@@ -123,6 +123,7 @@ if(FFMPEG_FOUND)
   # in it (it logs through the runtime's WarnF).
   add_library(recomp_audio SHARED
     src/runtime/audio/source.cpp
+    src/runtime/audio/media_player.cpp
     src/runtime/audio/mixer.cpp
     src/runtime/audio/reverb.cpp
     src/runtime/audio/digital_reverb.cpp
@@ -150,9 +151,9 @@ if(FFMPEG_FOUND)
   add_library(recomp_dsound SHARED src/runtime/hle/dsound.cpp)
   target_link_libraries(recomp_dsound PUBLIC recomp_runtime recomp_audio)
 
-  # DirectShow filter graph (quartz); no decoder.
+  # DirectShow filter graph (quartz) for audio files, on the software mixer.
   add_library(recomp_quartz SHARED src/runtime/hle/quartz.cpp)
-  target_link_libraries(recomp_quartz PUBLIC recomp_runtime)
+  target_link_libraries(recomp_quartz PUBLIC recomp_runtime recomp_audio)
 
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink SHARED src/runtime/hle/binkw32.cpp)

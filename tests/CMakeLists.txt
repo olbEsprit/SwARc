@@ -126,3 +126,14 @@ add_executable(hlsl_bytecode_test hlsl_bytecode_test.cpp)
 target_link_libraries(hlsl_bytecode_test PRIVATE recomp_hlsl)
 add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
          ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl ${CMAKE_CURRENT_BINARY_DIR})
+
+# media_player_test: an audio file on a mixer voice with a filter graph's
+# transport (runtime/audio/media_player.h), rendered offline; a synthetic
+# WAV always, a runtime-supplied file (MEDIA_PLAYER_TEST_FILE, e.g. ASF/WMA)
+# when set. Portable.
+if(FFMPEG_FOUND)
+  add_executable(media_player_test media_player_test.cpp)
+  target_link_libraries(media_player_test PRIVATE recomp_audio)
+  target_compile_features(media_player_test PRIVATE cxx_std_20)
+  add_test(NAME media_player COMMAND media_player_test)
+endif()

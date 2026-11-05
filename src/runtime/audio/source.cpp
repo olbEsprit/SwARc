@@ -5,6 +5,8 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/log.h>
 #include <libavutil/channel_layout.h>
 }
 
@@ -168,6 +170,173 @@ class Mp3Source : public Source {
   AVFrame* frame_ = nullptr;
   size_t off_ = 0;
   bool flushed_ = false;
+  std::vector<float> pending_;
+  size_t pending_pos_ = 0;
+};
+
+// ---- Any container libavformat knows (ASF/WMA, ...) --------------------------
+
+class FileSource : public Source {
+ public:
+  explicit FileSource(Bytes data) : data_(std::move(data)) {}
+  ~FileSource() override {
+    avcodec_free_context(&ctx_);
+    av_packet_free(&pkt_);
+    av_frame_free(&frame_);
+    avformat_close_input(&fmt_);
+    if (io_) {
+      av_freep(&io_->buffer);
+      avio_context_free(&io_);
+    }
+  }
+
+  bool Init(std::string* err) {
+    av_log_set_level(AV_LOG_ERROR);
+    io_ = avio_alloc_context(static_cast<uint8_t*>(av_malloc(kIoBuf)), kIoBuf, 0, this,
+                             &FileSource::ReadCb, nullptr, &FileSource::SeekCb);
+    fmt_ = avformat_alloc_context();
+    if (!io_ || !fmt_) return *err = "out of memory", false;
+    fmt_->pb = io_;
+    fmt_->flags |= AVFMT_FLAG_CUSTOM_IO;
+    if (avformat_open_input(&fmt_, "", nullptr, nullptr) < 0)
+      return *err = "not a container libavformat reads", false;
+    if (avformat_find_stream_info(fmt_, nullptr) < 0)
+      return *err = "no stream information", false;
+    const AVCodec* codec = nullptr;
+    stream_ = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
+    if (stream_ < 0 || !codec) return *err = "no audio stream with a decoder", false;
+    AVStream* st = fmt_->streams[stream_];
+    ctx_ = avcodec_alloc_context3(codec);
+    if (!ctx_ || avcodec_parameters_to_context(ctx_, st->codecpar) < 0 ||
+        avcodec_open2(ctx_, codec, nullptr) < 0)
+      return *err = "cannot open the audio decoder", false;
+    pkt_ = av_packet_alloc();
+    frame_ = av_frame_alloc();
+    channels_ = std::min(ctx_->ch_layout.nb_channels, 2);
+    rate_ = ctx_->sample_rate;
+    if (channels_ < 1 || rate_ < 1) return *err = "audio stream without a format", false;
+    if (st->duration > 0)
+      length_ = av_rescale_q(st->duration, st->time_base, AVRational{1, rate_});
+    else if (fmt_->duration > 0)
+      length_ = av_rescale(fmt_->duration, rate_, AV_TIME_BASE);
+    return true;
+  }
+
+  int Read(float* out, int n) override {
+    int done = 0;
+    while (done < n) {
+      size_t avail = (pending_.size() - pending_pos_) / channels_;
+      if (!avail) {
+        if (!Decode()) break;
+        continue;
+      }
+      size_t take = std::min<size_t>(avail, n - done);
+      std::memcpy(out + done * channels_, pending_.data() + pending_pos_,
+                  take * channels_ * sizeof(float));
+      pending_pos_ += take * channels_;
+      pos_ += int64_t(take);
+      done += int(take);
+    }
+    return done;
+  }
+
+  // Exact: containers land on packet boundaries whose timestamps do not
+  // pin the decoder's frames, so the data is decoded up to f from the start
+  // (or from here, going forward).
+  bool Seek(int64_t f) override {
+    f = std::max<int64_t>(f, 0);
+    if (f < pos_ || f == 0) {
+      AVStream* st = fmt_->streams[stream_];
+      int64_t t0 = st->start_time != AV_NOPTS_VALUE ? st->start_time : 0;
+      if (avformat_seek_file(fmt_, stream_, INT64_MIN, t0, t0, 0) < 0 &&
+          av_seek_frame(fmt_, stream_, t0, AVSEEK_FLAG_BACKWARD) < 0)
+        return false;
+      avcodec_flush_buffers(ctx_);
+      pending_.clear();
+      pending_pos_ = 0;
+      drained_ = false;
+      pos_ = 0;
+    }
+    while (pos_ < f) {
+      int64_t have = int64_t((pending_.size() - pending_pos_) / channels_);
+      if (!have) {
+        if (!Decode()) break;
+        continue;
+      }
+      int64_t skip = std::min(f - pos_, have);
+      pending_pos_ += size_t(skip) * channels_;
+      pos_ += skip;
+    }
+    return true;
+  }
+
+  int64_t Length() const override { return length_; }
+
+ private:
+  static constexpr int kIoBuf = 32768;
+
+  static int ReadCb(void* o, uint8_t* buf, int size) {
+    auto* s = static_cast<FileSource*>(o);
+    size_t left = s->data_->size() - s->off_;
+    if (!left) return AVERROR_EOF;
+    size_t n = std::min<size_t>(left, size_t(size));
+    std::memcpy(buf, s->data_->data() + s->off_, n);
+    s->off_ += n;
+    return int(n);
+  }
+  static int64_t SeekCb(void* o, int64_t off, int whence) {
+    auto* s = static_cast<FileSource*>(o);
+    if (whence == AVSEEK_SIZE) return int64_t(s->data_->size());
+    int64_t base = 0;
+    switch (whence & ~AVSEEK_FORCE) {
+      case SEEK_SET: break;
+      case SEEK_CUR: base = int64_t(s->off_); break;
+      case SEEK_END: base = int64_t(s->data_->size()); break;
+      default: return -1;
+    }
+    int64_t t = base + off;
+    if (t < 0 || t > int64_t(s->data_->size())) return -1;
+    s->off_ = size_t(t);
+    return t;
+  }
+
+  // Decodes the next frame into pending_; false at the end of the data.
+  bool Decode() {
+    pending_.clear();
+    pending_pos_ = 0;
+    for (;;) {
+      int r = avcodec_receive_frame(ctx_, frame_);
+      if (r == 0) {
+        pending_.resize(size_t(frame_->nb_samples) * channels_);
+        ConvertFrame(frame_, channels_, pending_.data());
+        av_frame_unref(frame_);
+        if (!pending_.empty()) return true;
+        continue;
+      }
+      if (r != AVERROR(EAGAIN)) return false;
+      if (drained_) return false;
+      int rr = av_read_frame(fmt_, pkt_);
+      if (rr < 0) {
+        avcodec_send_packet(ctx_, nullptr);
+        drained_ = true;
+        continue;
+      }
+      if (pkt_->stream_index == stream_) avcodec_send_packet(ctx_, pkt_);
+      av_packet_unref(pkt_);
+    }
+  }
+
+  Bytes data_;
+  size_t off_ = 0;
+  AVIOContext* io_ = nullptr;
+  AVFormatContext* fmt_ = nullptr;
+  AVCodecContext* ctx_ = nullptr;
+  AVPacket* pkt_ = nullptr;
+  AVFrame* frame_ = nullptr;
+  int stream_ = -1;
+  int64_t length_ = -1;
+  int64_t pos_ = 0;  // frame index of pending_[pending_pos_]
+  bool drained_ = false;
   std::vector<float> pending_;
   size_t pending_pos_ = 0;
 };
@@ -373,6 +542,12 @@ void ConvertFrame(const AVFrame* f, int out_ch, float* out) {
             32768.0f;
       out[size_t(i) * out_ch + c] = v;
     }
+}
+
+std::unique_ptr<Source> MakeFileSource(Bytes data, std::string* err) {
+  auto s = std::make_unique<FileSource>(std::move(data));
+  if (!s->Init(err)) return nullptr;
+  return s;
 }
 
 std::unique_ptr<Source> MakeSource(Bytes data, std::string* err) {
