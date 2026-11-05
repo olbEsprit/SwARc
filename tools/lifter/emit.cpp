@@ -1700,6 +1700,12 @@ void InsnEmitter::EmitSse() {
       L(Fmt("::recomp::sse::Rsqrt(%s, %s);", XmmRef(0).c_str(), s.c_str()));
       return;
     }
+    case ZYDIS_MNEMONIC_RCPPS: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::Rcp(%s, %s);", XmmRef(0).c_str(), s.c_str()));
+      return;
+    }
     case ZYDIS_MNEMONIC_PADDQ: {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
@@ -1945,6 +1951,12 @@ void InsnEmitter::EmitSse() {
       if (!IsXmm(0)) return Unimpl();
       std::string s = src(1);
       L(Fmt("::recomp::sse::RsqrtSs(%s, %s);", XmmRef(0).c_str(), s.c_str()));
+      return;
+    }
+    case ZYDIS_MNEMONIC_RCPSS: {
+      if (!IsXmm(0)) return Unimpl();
+      std::string s = src(1);
+      L(Fmt("::recomp::sse::RcpSs(%s, %s);", XmmRef(0).c_str(), s.c_str()));
       return;
     }
     case ZYDIS_MNEMONIC_BLENDVPS: case ZYDIS_MNEMONIC_BLENDVPD: {

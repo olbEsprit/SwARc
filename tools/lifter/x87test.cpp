@@ -327,8 +327,9 @@ bool SseCandidate(const Insn& in) {
   }
   if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR)
     return false;
-  // Approximate: no host result to match (tests/sse_rsqrt_test instead).
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS)
+  // Approximate: no host result to match (tests/sse_rsqrt_test, sse_rcp_test instead).
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS ||
+      in.d.mnemonic == ZYDIS_MNEMONIC_RCPPS || in.d.mnemonic == ZYDIS_MNEMONIC_RCPSS)
     return false;
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
