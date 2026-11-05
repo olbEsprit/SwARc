@@ -160,11 +160,6 @@ int main(int argc, char** argv) {
   if (p.x64)
     prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
 
-  // --int-test / --x87-test OUT: lifted instruction forms for tests/lift_{int,x87}_test.cpp,
-  // from the Ghidra entries only.
-  if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
-  if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
-
   // --dump VA: show decoded operands of one function, for debugging the
   // emitter against Zydis' operand model.
   if (dump) {
@@ -283,7 +278,9 @@ int main(int argc, char** argv) {
   std::printf("jump tables: %zu from Ghidra, %zu recovered\n",
               p.jumptables.size() - recovered_tables, recovered_tables);
 
-  // The SSE and MMX forms also come from the functions pass 1 discovered.
+  // Oracle forms come from every function pass 1 found, discovered ones included.
+  if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
+  if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
   if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
   if (!mmx_test.empty()) return lifter::WriteMmxTest(p, dec, mmx_test, prologue.c_str());
 
