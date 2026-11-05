@@ -14,4 +14,6 @@ int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue);
 int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue);
+int WriteMmxTest(const Program& p, const Decoder& dec, const std::string& out,
+                 const char* prologue);
 }  // namespace lifter

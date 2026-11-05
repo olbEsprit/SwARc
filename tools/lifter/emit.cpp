@@ -614,6 +614,7 @@ class InsnEmitter {
   void EmitString64(int n, StringKind kind);
   void EmitX87();
   void EmitSse();
+  void EmitMmx();
   void EmitAvx();
   // ---- AVX: VEX operands by 128-bit half (h = 0: c.xmm, 1: c.ymm_hi) ----
   static int VecIndex(ZydisRegister r) {
@@ -2569,6 +2570,94 @@ void InsnEmitter::Emit64() {
   Unimpl();
 }
 
+// MMX integer instructions on the x87 registers (runtime/mmx.h). Forms
+// with a count in a register or memory, and everything outside the MMX
+// ISA set (SSE instructions on MMX registers, 3DNow!), stay unimplemented.
+void InsnEmitter::EmitMmx() {
+  const auto m = d_.mnemonic;
+  if (m == ZYDIS_MNEMONIC_EMMS) {
+    L("::recomp::mmx::Emms(c);");
+    return;
+  }
+  auto mm = [&](int i) {
+    return IsReg(i) && Op(i).reg.value >= ZYDIS_REGISTER_MM0 &&
+           Op(i).reg.value <= ZYDIS_REGISTER_MM7;
+  };
+  auto ref = [&](int i) { return Fmt("c.fpu.r[%d].sig", Op(i).reg.value - ZYDIS_REGISTER_MM0); };
+  if (Nvis() < 2 || !PrepareMem()) return Unimpl();
+  if (m == ZYDIS_MNEMONIC_MOVD || m == ZYDIS_MNEMONIC_MOVQ) {
+    const bool wide = m == ZYDIS_MNEMONIC_MOVQ;
+    const int bytes = wide ? 8 : 4;
+    if (mm(0) && (IsMem(1) ? Bytes(1) == bytes : mm(1) == wide)) {
+      L("::recomp::mmx::Enter(c);");
+      const std::string v = IsMem(1) ? Fmt("uint64_t(::recomp::lift::Rd<%s>(B, m1))", wide ? "uint64_t" : "uint32_t")
+                            : wide   ? ref(1)
+                                     : Fmt("uint64_t(%s)", Read(1).c_str());
+      L(Fmt("::recomp::mmx::Set(c, %d, %s);", Op(0).reg.value - ZYDIS_REGISTER_MM0, v.c_str()));
+      return;
+    }
+    if (mm(1) && (IsMem(0) ? Bytes(0) == bytes : (!wide && !mm(0)))) {
+      L("::recomp::mmx::Enter(c);");
+      if (wide)
+        L(Fmt("::recomp::lift::Wr<uint64_t>(B, m0, %s);", ref(1).c_str()));
+      else
+        L(Write(0, Fmt("uint32_t(%s)", ref(1).c_str()), 4));
+      return;
+    }
+    return Unimpl();
+  }
+  struct Bin {
+    ZydisMnemonic m;
+    const char* fn;
+  };
+  static const Bin kBin[] = {
+      {ZYDIS_MNEMONIC_PADDB, "Paddb"}, {ZYDIS_MNEMONIC_PADDW, "Paddw"},
+      {ZYDIS_MNEMONIC_PADDD, "Paddd"}, {ZYDIS_MNEMONIC_PADDSW, "Paddsw"},
+      {ZYDIS_MNEMONIC_PSUBW, "Psubw"}, {ZYDIS_MNEMONIC_PSUBD, "Psubd"},
+      {ZYDIS_MNEMONIC_PSUBSW, "Psubsw"}, {ZYDIS_MNEMONIC_PMULLW, "Pmullw"},
+      {ZYDIS_MNEMONIC_PMULHW, "Pmulhw"}, {ZYDIS_MNEMONIC_PMADDWD, "Pmaddwd"},
+      {ZYDIS_MNEMONIC_PACKSSDW, "Packssdw"}, {ZYDIS_MNEMONIC_PACKUSWB, "Packuswb"},
+      {ZYDIS_MNEMONIC_PUNPCKLBW, "Punpcklbw"}, {ZYDIS_MNEMONIC_PUNPCKLWD, "Punpcklwd"},
+      {ZYDIS_MNEMONIC_PUNPCKLDQ, "Punpckldq"}, {ZYDIS_MNEMONIC_PUNPCKHBW, "Punpckhbw"},
+      {ZYDIS_MNEMONIC_PUNPCKHWD, "Punpckhwd"}, {ZYDIS_MNEMONIC_PUNPCKHDQ, "Punpckhdq"},
+      {ZYDIS_MNEMONIC_PANDN, "Pandn"}, {ZYDIS_MNEMONIC_PCMPEQW, "Pcmpeqw"},
+      {ZYDIS_MNEMONIC_PCMPEQD, "Pcmpeqd"}, {ZYDIS_MNEMONIC_PCMPGTD, "Pcmpgtd"},
+      {ZYDIS_MNEMONIC_PMAXSW, "Pmaxsw"}, {ZYDIS_MNEMONIC_PACKSSWB, "Packsswb"},
+      {ZYDIS_MNEMONIC_PAND, "Pand"}, {ZYDIS_MNEMONIC_POR, "Por"}, {ZYDIS_MNEMONIC_PXOR, "Pxor"},
+  };
+  static const Bin kShift[] = {
+      {ZYDIS_MNEMONIC_PSLLW, "Psllw"}, {ZYDIS_MNEMONIC_PSLLD, "Pslld"},
+      {ZYDIS_MNEMONIC_PSLLQ, "Psllq"}, {ZYDIS_MNEMONIC_PSRLW, "Psrlw"},
+      {ZYDIS_MNEMONIC_PSRLD, "Psrld"},
+      {ZYDIS_MNEMONIC_PSRLQ, "Psrlq"}, {ZYDIS_MNEMONIC_PSRAW, "Psraw"},
+      {ZYDIS_MNEMONIC_PSRAD, "Psrad"},
+  };
+  if (!mm(0)) return Unimpl();
+  const std::string d = ref(0);
+  for (const Bin& b : kShift)
+    if (b.m == m) {
+      if (!IsImm(1)) return Unimpl();
+      L("::recomp::mmx::Enter(c);");
+      L(Fmt("::recomp::mmx::Set(c, %d, ::recomp::mmx::%s(%s, %s));",
+            Op(0).reg.value - ZYDIS_REGISTER_MM0, b.fn, d.c_str(),
+            Hex(uint32_t(Op(1).imm.value.u & 0xFF)).c_str()));
+      return;
+    }
+  for (const Bin& b : kBin)
+    if (b.m == m) {
+      if (!mm(1) && !IsMem(1)) return Unimpl();
+      L("::recomp::mmx::Enter(c);");
+      L(Fmt("const uint64_t s = %s;",
+            mm(1) ? ref(1).c_str()
+                  : Fmt("uint64_t(::recomp::lift::Rd<%s>(B, m1))",
+                        Bytes(1) == 4 ? "uint32_t" : "uint64_t").c_str()));
+      L(Fmt("::recomp::mmx::Set(c, %d, ::recomp::mmx::%s(%s, s));",
+            Op(0).reg.value - ZYDIS_REGISTER_MM0, b.fn, d.c_str()));
+      return;
+    }
+  Unimpl();
+}
+
 void InsnEmitter::Emit() {
   const auto m = d_.mnemonic;
   const uint64_t next = in_.next();
@@ -2579,6 +2668,7 @@ void InsnEmitter::Emit() {
   }
   if (d_.meta.isa_set == ZYDIS_ISA_SET_AVX) return EmitAvx();
   if (IsSse(d_)) return EmitSse();
+  if (d_.meta.isa_set == ZYDIS_ISA_SET_PENTIUMMMX) return EmitMmx();
   if (d_.meta.category == ZYDIS_CATEGORY_STRINGOP) return EmitString();
 
   // Far pointers and other operand widths we don't model (only seen in
@@ -3065,6 +3155,7 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
 // Non-x87 instructions that may sit inside an x87 run: anything straight-
 // line that does not call out (the run's state is only in locals).
 static bool RunNeutral(const Insn& in) {
+  if (in.d.meta.isa_set == ZYDIS_ISA_SET_PENTIUMMMX) return false;  // reads and writes c.fpu
   switch (in.d.meta.category) {
     case ZYDIS_CATEGORY_CALL: case ZYDIS_CATEGORY_RET:
     case ZYDIS_CATEGORY_COND_BR: case ZYDIS_CATEGORY_UNCOND_BR:

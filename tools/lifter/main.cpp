@@ -5,6 +5,7 @@
 //            [--x87-test OUT.cpp]   (forms for tests/lift_x87_test.cpp)
 //            [--int-test OUT.cpp]   (forms for tests/lift_int_test.cpp)
 //            [--sse-test OUT.cpp]   (forms for tests/lift_sse_test.cpp)
+//            [--mmx-test OUT.cpp]   (forms for tests/lift_mmx_test.cpp)
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
@@ -99,7 +100,7 @@ int main(int argc, char** argv) {
   std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint64_t dump = 0;
-  std::string x87_test, int_test, sse_test;
+  std::string x87_test, int_test, sse_test, mmx_test;
   std::set<uint64_t> only;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -115,6 +116,7 @@ int main(int argc, char** argv) {
     else if (a == "--x87-test") x87_test = val();
     else if (a == "--int-test") int_test = val();
     else if (a == "--sse-test") sse_test = val();
+    else if (a == "--mmx-test") mmx_test = val();
     else if (a == "--only") {
       std::string list = val();
       for (size_t pos = 0; pos < list.size();) {
@@ -158,10 +160,11 @@ int main(int argc, char** argv) {
   if (p.x64)
     prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
 
-  // --int-test / --x87-test / --sse-test OUT: lifted instruction forms for
-  // tests/lift_{int,x87,sse}_test.cpp.
+  // --int-test / --x87-test / --sse-test / --mmx-test OUT: lifted instruction forms for
+  // tests/lift_{int,x87,sse,mmx}_test.cpp.
   if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
   if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
+  if (!mmx_test.empty()) return lifter::WriteMmxTest(p, dec, mmx_test, prologue.c_str());
   if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
 
   // --dump VA: show decoded operands of one function, for debugging the
