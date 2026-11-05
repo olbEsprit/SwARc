@@ -7,8 +7,9 @@
 // use gfx::Device's fixed-function pipeline (D3D7 semantics) with the
 // D3D9 state in its terms: sampler states at D3D7's texture-stage
 // positions, D3D9's transform numbers mapped. A vertex shader with no pixel
-// shader gets a pixel shader generated from the texture-stage state; a
-// pixel shader without a vertex shader and fixed-function draws with a
+// shader gets a pixel shader generated from the texture-stage state, and a
+// pixel shader with no vertex shader a vertex shader generated from the
+// vertex declaration (d3d9_fixed_vertex.cpp); fixed-function draws with a
 // vertex declaration (no FVF) are not supported yet (fatal, named).
 
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/hle/d3d9_fixed_vertex.h"
 #include "runtime/hle/d3d9_impl.h"
 #include "runtime/hle/hle.h"
 #include "runtime/log.h"
@@ -342,23 +344,23 @@ std::string FixedFunctionPixelSource(const Device& d, const hlsl::Program& vs) {
   return src;
 }
 
-// The generated pixel shader for this state, created on first use and kept
-// in the device (each source is one gfx shader).
-Shader* FixedFunctionPixel(Device& d, const Shader& vs) {
-  std::string source = FixedFunctionPixelSource(d, *vs.program);
-  auto it = d.ff_pixel.find(source);
-  if (it != d.ff_pixel.end()) return it->second.get();
+// A generated shader for `source`, created on first use and kept in the
+// device (each source is one gfx shader).
+Shader* Generated(Device& d, std::map<std::string, std::shared_ptr<Shader>>& cache,
+                  const std::string& source, bool pixel) {
+  auto it = cache.find(source);
+  if (it != cache.end()) return it->second.get();
   auto program = std::make_shared<hlsl::Program>();
   std::string errors;
-  if (!hlsl::Compile(source, {}, "main", "ps_3_0", 0, program.get(), &errors))
-    FatalF("d3d9: the generated fixed-function pixel shader does not compile:\n%s\n%s",
-           errors.c_str(), source.c_str());
+  if (!hlsl::Compile(source, {}, "main", pixel ? "ps_3_0" : "vs_3_0", 0, program.get(), &errors))
+    FatalF("d3d9: the generated fixed-function %s shader does not compile:\n%s\n%s",
+           pixel ? "pixel" : "vertex", errors.c_str(), source.c_str());
   auto s = std::make_shared<Shader>();
   s->device = d.guest;
-  s->pixel = true;
+  s->pixel = pixel;
   s->program = std::move(program);
   s->id = d.gfx->CreateShader(*s->program);
-  return d.ff_pixel.emplace(std::move(source), std::move(s)).first->second.get();
+  return cache.emplace(source, std::move(s)).first->second.get();
 }
 
 // Completes `sd` (primitive, counts, and any streams already given) from
@@ -370,11 +372,6 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
     DrawFixed(d, sd, what);
     return;
   }
-  if (!vs)
-    FatalF("d3d9: %s with a pixel shader and the fixed-function vertex stage is not supported yet",
-           what);
-  if (!ps) ps = FixedFunctionPixel(d, *vs);
-
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;
   if (auto* decl = com::As<VertexDecl>(d.decl)) {
@@ -385,17 +382,17 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   } else {
     FatalF("d3d9: %s without a vertex declaration or FVF", what);
   }
-  const auto& sem = vs->program->inputs;
-  std::vector<gfx::VertexInput> inputs(sem.size());
-  for (size_t i = 0; i < sem.size(); i++) {
-    for (const auto& e : *elements) {
-      if (e.Stream == 0xFF) break;
-      if (e.Usage == sem[i].usage && e.UsageIndex == sem[i].index) {
-        inputs[i] = {e.Stream, e.Offset, e.Type};
-        break;
-      }
-    }
+  float ff_constants[4][4];
+  const float(*vs_float)[4] = d.vs_f;
+  if (!vs) {
+    FixedVertexState fv{elements, &ps->program->varyings, d.tss, d.rs[137] != 0};
+    vs = Generated(d, d.ff_vertex, FixedVertexSource(fv), false);
+    WorldViewProjection(d.transforms, &ff_constants[0][0]);
+    vs_float = ff_constants;
+  } else if (!ps) {
+    ps = Generated(d, d.ff_pixel, FixedFunctionPixelSource(d, *vs->program), true);
   }
+  std::vector<gfx::VertexInput> inputs = VertexInputs(vs->program->inputs, *elements);
   sd.inputs = inputs.data();
   sd.input_count = uint32_t(inputs.size());
 
@@ -413,7 +410,7 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
 
   sd.vs = vs->id;
   sd.ps = ps->id;
-  sd.vs_float = d.vs_f;
+  sd.vs_float = vs_float;
   sd.vs_int = d.vs_i;
   sd.vs_bool = reinterpret_cast<const uint32_t*>(d.vs_b);
   sd.ps_float = d.ps_f;
