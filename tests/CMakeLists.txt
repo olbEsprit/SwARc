@@ -137,3 +137,13 @@ target_compile_features(d3d9_fixed_vertex_test PRIVATE cxx_std_20)
 target_link_libraries(d3d9_fixed_vertex_test PRIVATE recomp_gfx recomp_hlsl recomp_runtime SDL3::SDL3)
 add_test(NAME d3d9_fixed_vertex COMMAND d3d9_fixed_vertex_test)
 set_tests_properties(d3d9_fixed_vertex PROPERTIES SKIP_RETURN_CODE 77)
+
+# gpu_cube_ff_test: cube textures in the SDL_GPU fixed-function pipeline
+# and cube faces as render targets, read back; skipped (77) where no GPU
+# device can be created.
+add_executable(gpu_cube_ff_test gpu_cube_ff_test.cpp)
+target_include_directories(gpu_cube_ff_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(gpu_cube_ff_test PRIVATE cxx_std_20)
+target_link_libraries(gpu_cube_ff_test PRIVATE recomp_gfx recomp_runtime SDL3::SDL3)
+add_test(NAME gpu_cube_ff COMMAND gpu_cube_ff_test)
+set_tests_properties(gpu_cube_ff PROPERTIES SKIP_RETURN_CODE 77)

@@ -9,7 +9,7 @@
 layout(std140, set = 3, binding = 0) uniform FsUniforms {
   ivec4 color[8];   // per stage: COLOROP, COLORARG1, COLORARG2, COLORARG0
   ivec4 alpha[8];   // per stage: ALPHAOP, ALPHAARG1, ALPHAARG2, ALPHAARG0
-  ivec4 stage[8];   // per stage: RESULTARG, texture bound, projected divisor index (-1 none), -
+  ivec4 stage[8];   // per stage: RESULTARG, texture bound (0 none, 1 2D, 2 cube), projected divisor index (-1 none), -
   vec4 tfactor;
   vec4 fog_color;
   vec4 fog;         // start, end, density
@@ -25,6 +25,14 @@ layout(set = 2, binding = 4) uniform sampler2D tx4;
 layout(set = 2, binding = 5) uniform sampler2D tx5;
 layout(set = 2, binding = 6) uniform sampler2D tx6;
 layout(set = 2, binding = 7) uniform sampler2D tx7;
+layout(set = 2, binding = 8) uniform samplerCube cx0;
+layout(set = 2, binding = 9) uniform samplerCube cx1;
+layout(set = 2, binding = 10) uniform samplerCube cx2;
+layout(set = 2, binding = 11) uniform samplerCube cx3;
+layout(set = 2, binding = 12) uniform samplerCube cx4;
+layout(set = 2, binding = 13) uniform samplerCube cx5;
+layout(set = 2, binding = 14) uniform samplerCube cx6;
+layout(set = 2, binding = 15) uniform samplerCube cx7;
 
 layout(location = 0) in vec4 i_diff;
 layout(location = 1) in vec4 i_spec;
@@ -112,7 +120,18 @@ void main() {
     int proj = u.stage[s].z;
     vec2 uv = proj >= 0 ? tc.xy / tc[proj] : tc.xy;
     vec4 tex = vec4(0.0, 0.0, 0.0, 1.0);
-    if (u.stage[s].y != 0) {
+    if (u.stage[s].y == 2) {
+      switch (s) {
+        case 0: tex = texture(cx0, tc.xyz); break;
+        case 1: tex = texture(cx1, tc.xyz); break;
+        case 2: tex = texture(cx2, tc.xyz); break;
+        case 3: tex = texture(cx3, tc.xyz); break;
+        case 4: tex = texture(cx4, tc.xyz); break;
+        case 5: tex = texture(cx5, tc.xyz); break;
+        case 6: tex = texture(cx6, tc.xyz); break;
+        default: tex = texture(cx7, tc.xyz); break;
+      }
+    } else if (u.stage[s].y != 0) {
       switch (s) {
         case 0: tex = texture(tx0, uv); break;
         case 1: tex = texture(tx1, uv); break;

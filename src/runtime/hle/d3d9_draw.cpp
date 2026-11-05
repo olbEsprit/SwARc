@@ -121,7 +121,6 @@ void SyncFixedFunction(Device& d) {
     d.gfx->SetTextureStageState(s, 20, ss[9]);  // MAXMIPLEVEL
     d.gfx->SetTextureStageState(s, 21, ss[10]);  // MAXANISOTROPY
     auto* t = active ? com::As<Texture>(d.textures[s]) : nullptr;
-    if (t && t->cube) FatalF("d3d9: fixed-function stage %u with a cube texture", s);
     d.gfx->SetTexture(s, t ? t->tex : 0);
   }
   // D3DTS_VIEW 2, PROJECTION 3 and TEXTURE0-7 16-23 are D3D7's numbers;

@@ -368,7 +368,7 @@ class GpuDevice final : public Device {
     fs.code_size = fs_size;
     fs.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
     fs.num_storage_buffers = 0;
-    fs.num_samplers = 8;
+    fs.num_samplers = 16;  // 2D 0-7, cube 8-15
     fs_ = SDL_CreateGPUShader(dev_, &fs);
     if (!vs_ || !fs_) FatalF("gfx: compiling the fixed-function shaders: %s", SDL_GetError());
 
@@ -1385,7 +1385,7 @@ void r_color0(inout vec4 c) {
   struct Cmd {
     PipelineKey key;
     int vs = 0, fs = 0;
-    SDL_GPUTexture* tex[8] = {};
+    SDL_GPUTexture* tex[16] = {};  // fixed-function: 2D stages 0-7, cube stages 8-15
     SDL_GPUSampler* smp[8] = {};
     SDL_GPUViewport viewport{};
     SDL_Rect scissor{};
@@ -1807,9 +1807,12 @@ void r_color0(inout vec4 c) {
             SDL_PushGPUFragmentUniformData(cmd, 0, &fs_list_[size_t(c.fs)], sizeof(FsUniforms));
             fs = c.fs;
           }
-          SDL_GPUTextureSamplerBinding tb[8];
-          for (int i = 0; i < 8; i++) tb[i] = {c.tex[i] ? c.tex[i] : dummy_, c.smp[i]};
-          SDL_BindGPUFragmentSamplers(rp, 0, tb, 8);
+          SDL_GPUTextureSamplerBinding tb[16];
+          for (int i = 0; i < 8; i++) {
+            tb[i] = {c.tex[i] ? c.tex[i] : dummy_, c.smp[i]};
+            tb[8 + i] = {c.tex[8 + i] ? c.tex[8 + i] : dummy_cube_, c.smp[i]};
+          }
+          SDL_BindGPUFragmentSamplers(rp, 0, tb, 16);
         }
         SDL_SetGPUViewport(rp, &c.viewport);
         SDL_SetGPUScissor(rp, &c.scissor);
@@ -2280,7 +2283,8 @@ void r_color0(inout vec4 c) {
   void BindStageTextures(Cmd& c) {
     for (int s = 0; s < 8; s++) {
       auto it = textures_.find(stage_tex_[s]);
-      c.tex[s] = it != textures_.end() ? it->second.tex : nullptr;
+      bool cube = it != textures_.end() && it->second.cube;
+      c.tex[cube ? 8 + s : s] = it != textures_.end() ? it->second.tex : nullptr;
       c.smp[s] = Sampler(StageSampler(s));
     }
   }
@@ -2404,7 +2408,8 @@ void r_color0(inout vec4 c) {
         u.alpha[s][2] = int(t[6]);
         u.alpha[s][3] = int(t[27]);
         u.stage[s][0] = int(t[28]);
-        u.stage[s][1] = textures_.count(stage_tex_[s]) ? 1 : 0;
+        auto st = textures_.find(stage_tex_[s]);
+        u.stage[s][1] = st == textures_.end() ? 0 : st->second.cube ? 2 : 1;
         uint32_t ttf = t[24], count = ttf & 0xFF;
         u.stage[s][2] = (ttf & 256) && count >= 2 ? int(count) - 1 : -1;
       }
