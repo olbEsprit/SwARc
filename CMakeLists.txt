@@ -150,6 +150,10 @@ if(FFMPEG_FOUND)
   add_library(recomp_dsound SHARED src/runtime/hle/dsound.cpp)
   target_link_libraries(recomp_dsound PUBLIC recomp_runtime recomp_audio)
 
+  # DirectShow filter graph (quartz); no decoder.
+  add_library(recomp_quartz SHARED src/runtime/hle/quartz.cpp)
+  target_link_libraries(recomp_quartz PUBLIC recomp_runtime)
+
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink SHARED src/runtime/hle/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
