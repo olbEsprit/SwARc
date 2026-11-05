@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "runtime/log.h"
+#include "runtime/runtime.h"
 
 namespace recomp::audio {
 
@@ -500,6 +501,17 @@ void Mixer::Mix(float* out, int frames) {
   }
   mixed_ += uint64_t(frames);
   for (int i = 0; i < 2 * frames; i++) out[i] = std::clamp(out[i], -1.0f, 1.0f);
+  static const bool rms_log = Env("AUDIO_RMS") != nullptr;
+  if (rms_log) {
+    for (int i = 0; i < 2 * frames; i++) rms_sum_ += double(out[i]) * out[i];
+    rms_frames_ += uint64_t(frames);
+    if (rms_frames_ >= uint64_t(rate_)) {
+      WarnF("audio: mix rms %.5f over %.2f s, %zu voices\n", std::sqrt(rms_sum_ / double(2 * rms_frames_)),
+            double(rms_frames_) / rate_, voices_.size());
+      rms_sum_ = 0;
+      rms_frames_ = 0;
+    }
+  }
 }
 
 }  // namespace recomp::audio
