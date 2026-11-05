@@ -314,8 +314,8 @@ bool BadOperands(const Insn& in) {
 }
 
 // SSE/SSE2 forms for tests/lift_sse_test.cpp: XMM-register forms only
-// (no MMX), without ldmxcsr (random memory would #GP or unmask) and
-// prefetches (no effect to compare).
+// (no MMX), without ldmxcsr (random memory would #GP or unmask),
+// prefetches (no effect to compare) and FISTTP (an x87 instruction).
 bool SseCandidate(const Insn& in) {
   switch (in.d.meta.isa_set) {
     case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2: case ZYDIS_ISA_SET_SSEMXCSR:
@@ -325,7 +325,8 @@ bool SseCandidate(const Insn& in) {
     default:
       return false;
   }
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR)
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR ||
+      in.d.mnemonic == ZYDIS_MNEMONIC_PREFETCHW || in.d.meta.category == ZYDIS_CATEGORY_X87_ALU)
     return false;
   // Approximate: no host result to match (tests/sse_rsqrt_test, sse_rcp_test instead).
   if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS ||

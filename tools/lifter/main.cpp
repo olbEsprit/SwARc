@@ -160,11 +160,9 @@ int main(int argc, char** argv) {
   if (p.x64)
     prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
 
-  // --int-test / --x87-test / --sse-test / --mmx-test OUT: lifted instruction forms for
-  // tests/lift_{int,x87,sse,mmx}_test.cpp.
+  // --int-test / --x87-test OUT: lifted instruction forms for tests/lift_{int,x87}_test.cpp,
+  // from the Ghidra entries only.
   if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
-  if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
-  if (!mmx_test.empty()) return lifter::WriteMmxTest(p, dec, mmx_test, prologue.c_str());
   if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
 
   // --dump VA: show decoded operands of one function, for debugging the
@@ -284,6 +282,10 @@ int main(int argc, char** argv) {
               from_code_ptrs, from_data_ptrs, p.weak.size());
   std::printf("jump tables: %zu from Ghidra, %zu recovered\n",
               p.jumptables.size() - recovered_tables, recovered_tables);
+
+  // The SSE and MMX forms also come from the functions pass 1 discovered.
+  if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
+  if (!mmx_test.empty()) return lifter::WriteMmxTest(p, dec, mmx_test, prologue.c_str());
 
   // Pass 2: final CFGs and emission.
   std::filesystem::create_directories(outdir);
