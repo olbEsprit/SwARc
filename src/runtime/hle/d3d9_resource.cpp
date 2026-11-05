@@ -782,11 +782,25 @@ HLE_NAMED("d3d9.dll", "IDirect3DSurface9::LockRect", D3DSurf9_LockRect, 4) {
   if (s->kind == Surface::Kind::TextureLevel)
     return LockLevel(*s->texture, uint32_t(s->face), uint32_t(s->level), Arg(c, 1), Arg(c, 2),
                      Arg(c, 3));
-  if (s->kind != Surface::Kind::Offscreen)
+  gfx::Format f = FormatFromD3D(s->desc.Format);
+  if (s->kind == Surface::Kind::RenderTarget) {
+    constexpr uint32_t kReadOnly = 0x10;
+    if (!(Arg(c, 3) & kReadOnly)) FatalF("d3d9: LockRect of a render target for writing not supported");
+    Device* d = DeviceOf(s->device);
+    if (!s->mem) {
+      s->pitch = gfx::RowPitch(f, s->desc.Width);
+      s->mem = HeapAllocProcess(s->pitch * gfx::RowCount(f, s->desc.Height), true);
+    }
+    gfx::ColorTarget target[4] = {};
+    target[0].tex = s->tex;
+    d->gfx->SetRenderTargets(target, 0);
+    d->gfx->ReadBack({0, 0, int32_t(s->desc.Width), int32_t(s->desc.Height)}, GPtr(s->mem),
+                     s->pitch, f);
+    BindTargets(*d);
+  } else if (s->kind != Surface::Kind::Offscreen)
     FatalF("d3d9: LockRect of a %s surface not supported",
            s->kind == Surface::Kind::BackBuffer ? "back buffer" :
            s->kind == Surface::Kind::DepthStencil ? "depth stencil" : "render target");
-  gfx::Format f = FormatFromD3D(s->desc.Format);
   gfx::Rect r{0, 0, int32_t(s->desc.Width), int32_t(s->desc.Height)};
   if (Arg(c, 2)) r = *G<gfx::Rect>(Arg(c, 2));
   uint32_t off = gfx::IsCompressed(f)
