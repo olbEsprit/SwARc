@@ -147,3 +147,11 @@ target_compile_features(gpu_cube_ff_test PRIVATE cxx_std_20)
 target_link_libraries(gpu_cube_ff_test PRIVATE recomp_gfx recomp_runtime SDL3::SDL3)
 add_test(NAME gpu_cube_ff COMMAND gpu_cube_ff_test)
 set_tests_properties(gpu_cube_ff PROPERTIES SKIP_RETURN_CODE 77)
+
+# wsock32_test: wsock32's ordinal imports (aliases of ws2_32's handlers)
+# through the thunk dispatch, over loopback TCP.
+add_executable(wsock32_test wsock32_test.cpp)
+target_include_directories(wsock32_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(wsock32_test PRIVATE cxx_std_20)
+target_link_libraries(wsock32_test PRIVATE recomp_runtime)
+add_test(NAME wsock32 COMMAND wsock32_test)
