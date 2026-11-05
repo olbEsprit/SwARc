@@ -177,6 +177,13 @@ QUARTZ_NOT_CONNECTED(SetTimeFormat, 2)
 QUARTZ_NOT_CONNECTED(GetDuration, 2)
 QUARTZ_NOT_CONNECTED(GetCurrentPosition, 2)
 QUARTZ_NOT_CONNECTED(SetPositions, 5)
+QUARTZ_NOT_CONNECTED(GetPositions, 3)
+QUARTZ_NOT_CONNECTED(GetStopPosition, 2)
+QUARTZ_NOT_CONNECTED(GetTimeFormat, 2)
+QUARTZ_NOT_CONNECTED(GetCapabilities, 2)
+QUARTZ_NOT_CONNECTED(GetAvailable, 3)
+QUARTZ_NOT_CONNECTED(SetRate, 3)
+QUARTZ_NOT_CONNECTED(GetRate, 2)
 
 HLE_NAMED("quartz.dll", "IBasicAudio::put_Volume", Audio_put_Volume, 2) {
   Self(c, "IBasicAudio")->graph->volume = int32_t(Arg(c, 1));
