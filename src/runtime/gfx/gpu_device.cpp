@@ -1885,7 +1885,7 @@ void r_color0(inout vec4 c) {
       SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &t, 1, nullptr));
       b.load_op = SDL_GPU_LOADOP_LOAD;
     }
-    b.filter = (w == bb_w_ && h == bb_h_) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
+    b.filter = (w % bb_w_ == 0 && h % bb_h_ == 0) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     SDL_BlitGPUTexture(cmd, &b);
     NotePresentation({bb_w_, bb_h_, int(sw), int(sh), r});
   }
