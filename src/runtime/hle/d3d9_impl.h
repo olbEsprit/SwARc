@@ -98,6 +98,7 @@ struct Surface : com::Object {
   uint32_t container = 0;      // TextureLevel: the texture's guest pointer
   int face = 0, level = 0;
   uint32_t mem = 0;  // Offscreen: its pixels
+  uint32_t read_ticket = 0;  // RenderTarget: copy started by the last read-only lock
   uint32_t pitch = 0;
   ~Surface() override;
 };

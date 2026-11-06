@@ -247,6 +247,7 @@ std::shared_ptr<const hlsl::Program> ReadTranslated(const std::vector<uint32_t>&
 Surface::~Surface() {
   Device* d = com::As<Device>(device);
   if (d && depth) d->gfx->DestroyDepth(depth);
+  if (d && read_ticket) d->gfx->FinishReadBack(read_ticket, nullptr, 0, gfx::Format::X8R8G8B8);
   if (d && tex) d->gfx->DestroyTexture(tex);
   if (mem) HeapFreeProcess(mem);
 }
@@ -794,8 +795,15 @@ HLE_NAMED("d3d9.dll", "IDirect3DSurface9::LockRect", D3DSurf9_LockRect, 4) {
     gfx::ColorTarget target[4] = {};
     target[0].tex = s->tex;
     d->gfx->SetRenderTargets(target, 0);
-    d->gfx->ReadBack({0, 0, int32_t(s->desc.Width), int32_t(s->desc.Height)}, GPtr(s->mem),
-                     s->pitch, f);
+    gfx::Rect all{0, 0, int32_t(s->desc.Width), int32_t(s->desc.Height)};
+    // Returns the target as of the previous lock: this one's copy is read at the next,
+    // so the CPU never waits for the GPU (auto-exposure histogram, one lock per frame).
+    if (s->read_ticket) {
+      d->gfx->FinishReadBack(s->read_ticket, GPtr(s->mem), s->pitch, f);
+    } else {
+      d->gfx->ReadBack(all, GPtr(s->mem), s->pitch, f);
+    }
+    s->read_ticket = d->gfx->StartReadBack(all);
     BindTargets(*d);
   } else if (s->kind != Surface::Kind::Offscreen)
     FatalF("d3d9: LockRect of a %s surface not supported",
