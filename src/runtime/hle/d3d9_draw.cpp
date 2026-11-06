@@ -192,13 +192,6 @@ std::string FixedFunctionPixelSource(const Device& d, const hlsl::Program& vs) {
     return std::find(vs.varyings.begin(), vs.varyings.end(), hlsl::Semantic{usage, index}) !=
            vs.varyings.end();
   };
-  auto f = [](float v) {
-    char b[32];
-    std::snprintf(b, sizeof b, "%.9g", v);
-    std::string s = b;
-    if (s.find_first_of(".eE") == std::string::npos) s += ".0";
-    return s;
-  };
   bool uses_spec = false, uses_tfactor = false, uses_splat = false;
   std::set<uint32_t> texcoords;
   auto arg = [&](uint32_t a) {
@@ -324,6 +317,7 @@ std::string FixedFunctionPixelSource(const Device& d, const hlsl::Program& vs) {
   }
 
   std::string src = samplers.empty() ? "" : samplers + "\n";
+  if (uses_tfactor) src += "float4 tfactor : register(c0);\n\n";
   if (uses_splat) src += "float4 ff_splat(float x) { return float4(x, x, x, x); }\n\n";
   src += "float4 main(" + params + ") : COLOR0 {\n";
   src += has_diff ? "  float4 diff = v_color0;\n"
@@ -331,12 +325,6 @@ std::string FixedFunctionPixelSource(const Device& d, const hlsl::Program& vs) {
   if (uses_spec)
     src += has_spec ? "  float4 spec = v_color1;\n"
                     : "  float4 spec = float4(0.0, 0.0, 0.0, 0.0);\n";
-  if (uses_tfactor) {
-    uint32_t tf = d.rs[60];
-    src += "  float4 tfactor = float4(" + f((tf >> 16 & 0xFF) / 255.0f) + ", " +
-           f((tf >> 8 & 0xFF) / 255.0f) + ", " + f((tf & 0xFF) / 255.0f) + ", " +
-           f((tf >> 24 & 0xFF) / 255.0f) + ");\n";
-  }
   src += "  float4 cur = diff;\n  float4 temp = float4(0.0, 0.0, 0.0, 0.0);\n";
   src += body + "  return cur;\n}\n";
   return src;
@@ -373,6 +361,7 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   if (!vs)
     FatalF("d3d9: %s with a pixel shader and the fixed-function vertex stage is not supported yet",
            what);
+  bool ff_ps = !ps;
   if (!ps) ps = FixedFunctionPixel(d, *vs);
 
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
@@ -417,6 +406,16 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   sd.vs_int = d.vs_i;
   sd.vs_bool = reinterpret_cast<const uint32_t*>(d.vs_b);
   sd.ps_float = d.ps_f;
+  float ff_f[224][4];
+  if (ff_ps && ps->program->float_regs) {
+    std::memcpy(ff_f, d.ps_f, sizeof ff_f);
+    uint32_t tf = d.rs[60];
+    ff_f[0][0] = float(tf >> 16 & 0xFF) / 255.0f;
+    ff_f[0][1] = float(tf >> 8 & 0xFF) / 255.0f;
+    ff_f[0][2] = float(tf & 0xFF) / 255.0f;
+    ff_f[0][3] = float(tf >> 24 & 0xFF) / 255.0f;
+    sd.ps_float = ff_f;
+  }
   sd.ps_int = d.ps_i;
   sd.ps_bool = reinterpret_cast<const uint32_t*>(d.ps_b);
   for (int i = 0; i < 20; i++) {
