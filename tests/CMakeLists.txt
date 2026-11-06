@@ -168,3 +168,13 @@ target_include_directories(wsock32_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(wsock32_test PRIVATE cxx_std_20)
 target_link_libraries(wsock32_test PRIVATE recomp_runtime)
 add_test(NAME wsock32 COMMAND wsock32_test)
+# media_player_test: an audio file on a mixer voice with a filter graph's
+# transport (runtime/audio/media_player.h), rendered offline; a synthetic
+# WAV always, a runtime-supplied file (MEDIA_PLAYER_TEST_FILE, e.g. ASF/WMA)
+# when set. Portable.
+if(FFMPEG_FOUND)
+  add_executable(media_player_test media_player_test.cpp)
+  target_link_libraries(media_player_test PRIVATE recomp_audio)
+  target_compile_features(media_player_test PRIVATE cxx_std_20)
+  add_test(NAME media_player COMMAND media_player_test)
+endif()
