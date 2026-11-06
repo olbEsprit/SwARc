@@ -352,8 +352,20 @@ Shader* Generated(Device& d, std::map<std::string, std::shared_ptr<Shader>>& cac
 
 // Completes `sd` (primitive, counts, and any streams already given) from
 // the device's bindings and draws it.
+bool Pretransformed(const Device& d) {
+  if (auto* decl = com::As<VertexDecl>(d.decl)) {
+    for (const auto& e : decl->elements) {
+      if (e.Stream == 0xFF) break;
+      if (e.Usage == USAGE_POSITIONT) return true;
+    }
+    return false;
+  }
+  return (d.fvf & 0x400E) == 0x004;
+}
+
 void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
-  Shader* vs = com::As<Shader>(d.vs);
+  // D3D9 skips a bound vertex shader for pretransformed positions; games leave one bound over 2D quads.
+  Shader* vs = Pretransformed(d) ? nullptr : com::As<Shader>(d.vs);
   Shader* ps = com::As<Shader>(d.ps);
   if (!vs && !ps) {
     DrawFixed(d, sd, what);
