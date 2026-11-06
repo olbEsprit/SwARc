@@ -161,6 +161,16 @@ target_link_libraries(gpu_cube_ff_test PRIVATE recomp_gfx recomp_runtime SDL3::S
 add_test(NAME gpu_cube_ff COMMAND gpu_cube_ff_test)
 set_tests_properties(gpu_cube_ff PROPERTIES SKIP_RETURN_CODE 77)
 
+# gpu_sm1_cube_test: a ps_1_x `tex` of a cube bound at its stage, through the
+# translator's cube_stages and the SDL_GPU device; skipped (77) without a GPU.
+add_executable(gpu_sm1_cube_test gpu_sm1_cube_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/hle/d3d9_fixed_vertex.cpp)
+target_include_directories(gpu_sm1_cube_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(gpu_sm1_cube_test PRIVATE cxx_std_20)
+target_link_libraries(gpu_sm1_cube_test PRIVATE recomp_gfx recomp_hlsl recomp_runtime SDL3::SDL3)
+add_test(NAME gpu_sm1_cube COMMAND gpu_sm1_cube_test)
+set_tests_properties(gpu_sm1_cube PROPERTIES SKIP_RETURN_CODE 77)
+
 # wsock32_test: wsock32's ordinal imports (aliases of ws2_32's handlers)
 # through the thunk dispatch, over loopback TCP.
 add_executable(wsock32_test wsock32_test.cpp)
