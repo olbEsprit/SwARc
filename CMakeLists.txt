@@ -327,7 +327,7 @@ function(recomp_add_lifted target dir)
 endfunction()
 
 # recomp_add_lift_tests(EXE <exe> SYMBOLS <dir> MANIFEST <file> [X64]):
-# oracle tests that run every x87, integer and SSE instruction form found
+# oracle tests that run every x87, integer, SSE and MMX instruction form found
 # in the EXE lifted and natively (x86-64 hosts only). X64: the EXE is an
 # x64 image; its integer and SSE/AVX forms go to tests/lift_x64_test.cpp
 # (lift_int64, lift_sse64; the latter needs an AVX host).
@@ -359,7 +359,7 @@ function(recomp_add_lift_tests)
     endforeach()
     return()
   endif()
-  foreach(_kind x87 int sse)
+  foreach(_kind x87 int sse mmx)
     set(_forms "${CMAKE_CURRENT_BINARY_DIR}/lift_${_kind}_forms.cpp")
     add_custom_command(OUTPUT "${_forms}"
       COMMAND recomp_lift --exe "${A_EXE}" --symbols "${A_SYMBOLS}"
@@ -376,6 +376,7 @@ function(recomp_add_lift_tests)
   set_tests_properties(lift_x87 PROPERTIES TIMEOUT 600)
   set_tests_properties(lift_int PROPERTIES TIMEOUT 900)
   set_tests_properties(lift_sse PROPERTIES TIMEOUT 900)
+  set_tests_properties(lift_mmx PROPERTIES TIMEOUT 600)
 endfunction()
 
 # recomp_add_digital_reverb_test(DLL <mss32.dll>): checks the Miles-

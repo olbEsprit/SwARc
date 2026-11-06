@@ -379,6 +379,25 @@ void Rsqrt(Xmm& d, const Xmm& s) {
   d = r;
 }
 
+uint32_t RcpLane(uint32_t x) {
+  const uint32_t exp = (x >> 23) & 0xFF, sign = x & 0x80000000u;
+  if (exp == 0xFF && (x & 0x7FFFFF)) return x | 0x00400000u;  // NaN: quieted
+  if (exp == 0) return sign | 0x7F800000u;                    // ±0, denormal: ±inf
+  if (exp == 0xFF || (x & 0x7FFFFFFFu) >= 0x7E7FE800u) return sign;  // ±inf, tiny result: ±0
+  const uint_fast8_t mode = softfloat_roundingMode, flags = softfloat_exceptionFlags;
+  softfloat_roundingMode = softfloat_round_near_even;
+  const uint32_t r = f32_div(float32_t{0x3F800000u}, float32_t{x}).v;
+  softfloat_roundingMode = mode;
+  softfloat_exceptionFlags = flags;
+  return r;
+}
+
+void Rcp(Xmm& d, const Xmm& s) {
+  Xmm r;
+  for (int i = 0; i < 4; i++) SetLane<uint32_t>(r, i, RcpLane(Lane<uint32_t>(s, i)));
+  d = r;
+}
+
 void Cvtsi2sd(Xmm& d, int32_t v) { SetLane<uint64_t>(d, 0, i32_to_f64(v).v); }
 
 uint32_t CvtToI32(Ctx& c, bool dbl, const Xmm& s, bool truncate, uint64_t va) {

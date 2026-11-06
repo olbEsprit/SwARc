@@ -49,6 +49,7 @@ std::string LiftSnippets(const Decoder& dec, const char* prologue,
   Module& m = q.modules.emplace_back();
   m.text_lo = base;
   m.text_hi = base + size;
+  m.code.push_back({base, base + size});
   uint64_t va = base;
   for (const auto& [bytes, slot] : code) {
     for (size_t i = 0; i < bytes->size(); i++) q.mem.write<uint8_t>(va + i, (*bytes)[i]);
@@ -313,8 +314,8 @@ bool BadOperands(const Insn& in) {
 }
 
 // SSE/SSE2 forms for tests/lift_sse_test.cpp: XMM-register forms only
-// (no MMX), without ldmxcsr (random memory would #GP or unmask) and
-// prefetches (no effect to compare).
+// (no MMX), without ldmxcsr (random memory would #GP or unmask),
+// prefetches (no effect to compare) and FISTTP (an x87 instruction).
 bool SseCandidate(const Insn& in) {
   switch (in.d.meta.isa_set) {
     case ZYDIS_ISA_SET_SSE: case ZYDIS_ISA_SET_SSE2: case ZYDIS_ISA_SET_SSEMXCSR:
@@ -324,16 +325,23 @@ bool SseCandidate(const Insn& in) {
     default:
       return false;
   }
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR)
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_LDMXCSR || in.d.mnemonic == ZYDIS_MNEMONIC_VLDMXCSR ||
+      in.d.mnemonic == ZYDIS_MNEMONIC_PREFETCHW || in.d.meta.category == ZYDIS_CATEGORY_X87_ALU)
     return false;
-  // Approximate: no host result to match (tests/sse_rsqrt_test instead).
-  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS)
+  // Approximate: no host result to match (tests/sse_rsqrt_test, sse_rcp_test instead).
+  if (in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTPS || in.d.mnemonic == ZYDIS_MNEMONIC_RSQRTSS ||
+      in.d.mnemonic == ZYDIS_MNEMONIC_RCPPS || in.d.mnemonic == ZYDIS_MNEMONIC_RCPSS)
     return false;
   for (int i = 0; i < in.d.operand_count; i++)
     if (in.ops[i].type == ZYDIS_OPERAND_TYPE_REGISTER &&
         ZydisRegisterGetClass(in.ops[i].reg.value) == ZYDIS_REGCLASS_MMX)
       return false;
   return !BadOperands(in);
+}
+
+// MMX forms for tests/lift_mmx_test.cpp.
+bool MmxCandidate(const Insn& in) {
+  return in.d.meta.isa_set == ZYDIS_ISA_SET_PENTIUMMMX && !BadOperands(in);
 }
 
 // GPR number (0..7, 0..15 for x64 code) behind a register of any width,
@@ -360,8 +368,10 @@ namespace {
 
 // The integer and SSE tests share the form extraction: each distinct
 // instruction (by bytes) with its memory operand rewritten to [base].
+enum class Kind { Int, Sse, Mmx };
+
 int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
-                  const char* prologue, bool sse) {
+                  const char* prologue, Kind kind) {
   struct IForm {
     std::vector<uint8_t> bytes;
     std::string text;
@@ -374,7 +384,7 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
     Function f;
     BuildFunction(p, dec, e, &f);
     for (const auto& [va, in] : f.insns) {
-      if (!in.ok || (sse ? !SseCandidate(in) : Excluded(in))) continue;
+      if (!in.ok || (kind == Kind::Sse ? !SseCandidate(in) : kind == Kind::Mmx ? !MmxCandidate(in) : Excluded(in))) continue;
       const uint8_t* raw = p.Bytes(va);
       std::vector<uint8_t> b;
       int base = -1;
@@ -458,9 +468,11 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
   std::vector<uint64_t> vas;
   std::string o = LiftSnippets(dec, prologue, code, &vas, p.x64);
   if (o.empty()) return 1;
-  const std::string kind = sse ? "Sse" : "Int";
-  o += std::string("#include \"lift_") + (sse ? "sse" : "int") + "_forms.h\"\n" +
-       "extern const " + kind + "Form k" + kind + "Forms[] = {\n";
+  const std::string name = kind == Kind::Sse ? "Sse" : kind == Kind::Mmx ? "Mmx" : "Int";
+  std::string lower = name;
+  lower[0] = char(lower[0] + 32);
+  o += "#include \"lift_" + lower + "_forms.h\"\n" +
+       "extern const " + name + "Form k" + name + "Forms[] = {\n";
   for (size_t i = 0; i < all.size(); i++) {
     const IForm& fm = *all[i];
     char buf[512];
@@ -471,10 +483,11 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
                   (unsigned long long)fm.example_va);
     o += buf;
   }
-  o += "};\nextern const int k" + kind + "FormCount = " + std::to_string(all.size()) +
+  o += "};\nextern const int k" + name + "FormCount = " + std::to_string(all.size()) +
        ";\n";
   if (WriteFile(out, o)) return 1;
-  std::printf("%s forms: %zu -> %s\n", sse ? "SSE" : "integer", all.size(), out.c_str());
+  std::printf("%s forms: %zu -> %s\n", kind == Kind::Sse ? "SSE" : kind == Kind::Mmx ? "MMX" : "integer",
+              all.size(), out.c_str());
   return 0;
 }
 
@@ -482,12 +495,17 @@ int WriteFormTest(const Program& p, const Decoder& dec, const std::string& out,
 
 int WriteIntTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue) {
-  return WriteFormTest(p, dec, out, prologue, false);
+  return WriteFormTest(p, dec, out, prologue, Kind::Int);
 }
 
 int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
                  const char* prologue) {
-  return WriteFormTest(p, dec, out, prologue, true);
+  return WriteFormTest(p, dec, out, prologue, Kind::Sse);
+}
+
+int WriteMmxTest(const Program& p, const Decoder& dec, const std::string& out,
+                 const char* prologue) {
+  return WriteFormTest(p, dec, out, prologue, Kind::Mmx);
 }
 
 }  // namespace lifter

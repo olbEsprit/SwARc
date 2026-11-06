@@ -27,6 +27,19 @@ target_compile_options(sse_rsqrt_test PRIVATE -O2)
 add_test(NAME sse_rsqrt COMMAND sse_rsqrt_test)
 set_tests_properties(sse_rsqrt PROPERTIES TIMEOUT 300)
 
+# mmx_test: runtime/mmx.h on known results (header-only).
+add_executable(mmx_test mmx_test.cpp)
+target_link_libraries(mmx_test PRIVATE recomp_x87)
+target_compile_options(mmx_test PRIVATE -O2)
+add_test(NAME mmx COMMAND mmx_test)
+
+# sse_rcp_test: RCPPS is the correctly rounded 1/x, within Intel's bound.
+add_executable(sse_rcp_test sse_rcp_test.cpp)
+target_link_libraries(sse_rcp_test PRIVATE recomp_x87)
+target_compile_options(sse_rcp_test PRIVATE -O2)
+add_test(NAME sse_rcp COMMAND sse_rcp_test)
+set_tests_properties(sse_rcp PROPERTIES TIMEOUT 300)
+
 # digital_reverb_test: the Miles-compatible digital reverb against a hash
 # of its own output recorded when it matched the original
 # (recomp_add_digital_reverb_test compares with the original itself);

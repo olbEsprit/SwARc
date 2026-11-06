@@ -9,11 +9,12 @@
 // or DAZ actually changing a result (a tiny result or a denormal operand
 // while they are set).
 //
-// RSQRTPS has no architectural result, only an error bound (|rel. error|
-// <= 1.5 * 2^-12), and CPUs differ: here it is the correctly rounded
-// 1/sqrt(x), within the bound and the same on every host (and what a
-// native replacement computes). tests/sse_rsqrt_test checks it
-// exhaustively; the bit-for-bit oracle against the host skips it.
+// RSQRTPS and RCPPS have no architectural result, only an error bound
+// (|rel. error| <= 1.5 * 2^-12), and CPUs differ: here they are the
+// correctly rounded 1/sqrt(x) and 1/x, within the bound and the same on
+// every host (and what a native replacement computes).
+// tests/sse_rsqrt_test checks them; the bit-for-bit oracle against the
+// host skips them.
 //
 // Only the forms the supported games use are implemented; the lifter
 // reports the rest as unimplemented.
@@ -83,6 +84,18 @@ void Sqrt(Ctx& c, bool dbl, int lanes, Xmm& d, const Xmm& s, uint64_t va);
 // NaNs themselves quieted.
 void Rsqrt(Xmm& d, const Xmm& s);
 uint32_t RsqrtLane(uint32_t x);
+
+// RCPPS: d = 1/s in all four float lanes, the correctly rounded quotient
+// (within the architectural bound like RSQRTPS). No flags: ±0 and
+// denormals give ±inf, ±inf and tiny results (|s| >= 1.1111111111010b *
+// 2^125) ±0, NaNs themselves quieted.
+void Rcp(Xmm& d, const Xmm& s);
+uint32_t RcpLane(uint32_t x);
+
+// RCPSS: the low lane of d = 1/the low lane of s, as RcpLane.
+inline void RcpSs(Xmm& d, const Xmm& s) {
+  SetLane<uint32_t>(d, 0, RcpLane(Lane<uint32_t>(s, 0)));
+}
 
 // CVTSI2SD: the low lane of d = (double)v (always exact).
 void Cvtsi2sd(Xmm& d, int32_t v);
