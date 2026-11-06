@@ -126,3 +126,32 @@ add_executable(hlsl_bytecode_test hlsl_bytecode_test.cpp)
 target_link_libraries(hlsl_bytecode_test PRIVATE recomp_hlsl)
 add_test(NAME hlsl_bytecode COMMAND hlsl_bytecode_test ${RECOMP_GLSLANG}
          ${CMAKE_CURRENT_SOURCE_DIR}/hlsl/prelude.glsl ${CMAKE_CURRENT_BINARY_DIR})
+
+# d3d9_fixed_vertex_test: the vertex shader generated for a pixel shader
+# without a vertex shader, drawn on the SDL_GPU device and read back;
+# skipped (77) where no GPU device can be created.
+add_executable(d3d9_fixed_vertex_test d3d9_fixed_vertex_test.cpp
+               ${PROJECT_SOURCE_DIR}/src/runtime/hle/d3d9_fixed_vertex.cpp)
+target_include_directories(d3d9_fixed_vertex_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(d3d9_fixed_vertex_test PRIVATE cxx_std_20)
+target_link_libraries(d3d9_fixed_vertex_test PRIVATE recomp_gfx recomp_hlsl recomp_runtime SDL3::SDL3)
+add_test(NAME d3d9_fixed_vertex COMMAND d3d9_fixed_vertex_test)
+set_tests_properties(d3d9_fixed_vertex PROPERTIES SKIP_RETURN_CODE 77)
+
+# gpu_cube_ff_test: cube textures in the SDL_GPU fixed-function pipeline
+# and cube faces as render targets, read back; skipped (77) where no GPU
+# device can be created.
+add_executable(gpu_cube_ff_test gpu_cube_ff_test.cpp)
+target_include_directories(gpu_cube_ff_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(gpu_cube_ff_test PRIVATE cxx_std_20)
+target_link_libraries(gpu_cube_ff_test PRIVATE recomp_gfx recomp_runtime SDL3::SDL3)
+add_test(NAME gpu_cube_ff COMMAND gpu_cube_ff_test)
+set_tests_properties(gpu_cube_ff PROPERTIES SKIP_RETURN_CODE 77)
+
+# wsock32_test: wsock32's ordinal imports (aliases of ws2_32's handlers)
+# through the thunk dispatch, over loopback TCP.
+add_executable(wsock32_test wsock32_test.cpp)
+target_include_directories(wsock32_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(wsock32_test PRIVATE cxx_std_20)
+target_link_libraries(wsock32_test PRIVATE recomp_runtime)
+add_test(NAME wsock32 COMMAND wsock32_test)

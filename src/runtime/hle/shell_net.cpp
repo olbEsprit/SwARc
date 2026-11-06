@@ -139,8 +139,6 @@ HLE_NAMED("wsock32.dll", "#115", WSAStartup, 2) {  // WSAStartup(version, WSADAT
   return 0;
 }
 
-HLE_NAMED("wsock32.dll", "#116", WSACleanup, 0) { return 0; }  // WSACleanup
-
 HLE_NAMED("wsock32.dll", "#57", gethostname, 2) {  // gethostname(buf, len)
   std::string n = "localhost";
   if (Arg(c, 1) < n.size() + 1) return 0xFFFFFFFF;
@@ -166,12 +164,6 @@ HLE_NAMED("wsock32.dll", "#52", gethostbyname, 1) {
     Wr32(hostent + 12, list);    // h_addr_list
   }
   return hostent;
-}
-
-HLE_NAMED("wsock32.dll", "#14", htonl, 1) { return __builtin_bswap32(Arg(c, 0)); }  // htonl
-
-HLE_NAMED("wsock32.dll", "#10", ioctlsocket, 3) {  // ioctlsocket: no sockets exist
-  return 0xFFFFFFFF;
 }
 
 }  // namespace
