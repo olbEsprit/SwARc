@@ -16,7 +16,8 @@
 // component of the swizzled source, which compilers always replicate.
 // As in the HLSL path, rsq, log and pow take |x| as the instructions do.
 // ps_1_x: t# registers hold tex / texcoord results from TEXCOORD#, samplers
-// are 2D (the stage's texture), r0 is the colour. The ps_1_x texture-matrix
+// are the stage's texture: 2D, or a cube where `cube_stages` has the stage's
+// bit (the shader has no dcl), r0 is the colour. The ps_1_x texture-matrix
 // and bump instructions and ps_1_4 phases are not supported (named).
 
 #include <algorithm>
@@ -95,7 +96,8 @@ std::string FloatBitsExpr(uint32_t bits) {
 
 class Translator {
  public:
-  Translator(const uint32_t* t, size_t n, Program* out) : t_(t), n_(n), out_(out) {}
+  Translator(const uint32_t* t, size_t n, Program* out, uint32_t cube_stages)
+      : t_(t), n_(n), out_(out), cube_stages_(cube_stages) {}
 
   void Run() {
     if (n_ < 2) Fail("shader too short");
@@ -246,7 +248,9 @@ class Translator {
       }
       if (pixel_ && major_ == 1 && (in.op == TEX || in.op == TEXCOORD)) {
         ps_texcoords_.insert(in.dst.num);
-        if (in.op == TEX) sampler_type_[in.dst.num] = ParamType::Sampler2D;
+        if (in.op == TEX)
+          sampler_type_[in.dst.num] =
+              cube_stages_ >> in.dst.num & 1 ? ParamType::SamplerCube : ParamType::Sampler2D;
       }
     }
     if (rel_const_) max_c_ = pixel_ ? 224 : 256;
@@ -702,8 +706,9 @@ class Translator {
     }
     if (pixel_ && major_ == 1 && in.op == TEX) {
       std::string n = std::to_string(in.dst.num);
-      Line("r_tx[" + n + "] = texture(" + SamplerName(in.dst.num) + ", r_tc[" + n + "].xy, R_BIAS(" +
-           n + "));");
+      const char* sw = sampler_type_[in.dst.num] == ParamType::SamplerCube ? ".xyz" : ".xy";
+      Line("r_tx[" + n + "] = texture(" + SamplerName(in.dst.num) + ", r_tc[" + n + "]" + sw +
+           ", R_BIAS(" + n + "));");
       return;
     }
     if (pixel_ && major_ == 1 && in.op == TEXCOORD) {
@@ -931,6 +936,7 @@ class Translator {
   std::set<std::pair<uint32_t, uint32_t>> written_, centroid_;
   std::map<uint32_t, ParamType> sampler_type_;
   std::set<uint32_t> used_samplers_;
+  uint32_t cube_stages_;
   std::set<std::string> helpers_;
 
   std::string main_, io_;
@@ -945,10 +951,11 @@ class Translator {
 
 }  // namespace
 
-bool TranslateBytecode(const uint32_t* tokens, size_t count, Program* out, std::string* errors) {
+bool TranslateBytecode(const uint32_t* tokens, size_t count, Program* out, std::string* errors,
+                       uint32_t cube_stages) {
   *out = Program{};
   try {
-    Translator(tokens, count, out).Run();
+    Translator(tokens, count, out, cube_stages).Run();
   } catch (const Error& e) {
     *errors = "bytecode: " + e.msg;
     return false;

@@ -147,6 +147,7 @@ struct Shader : com::Object {
   // the gfx shader made from it.
   std::shared_ptr<const hlsl::Program> program;
   gfx::ShaderId id = 0;
+  std::map<uint32_t, std::shared_ptr<Shader>> variants;  // ps_1_x by bound cube stages
   ~Shader() override;
 };
 

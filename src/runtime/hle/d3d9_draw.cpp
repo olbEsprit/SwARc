@@ -363,6 +363,30 @@ bool Pretransformed(const Device& d) {
   return (d.fvf & 0x400E) == 0x004;
 }
 
+// A ps_1_x shader has no sampler declarations: each stage samples the
+// texture bound there, a cube or a 2D one. The variant for the cubes bound now.
+Shader* PixelVariant(const Device& d, Shader* ps) {
+  if (ps->program->major != 1 || ps->tokens.empty()) return ps;
+  uint32_t cubes = 0;
+  for (const hlsl::Sampler& smp : ps->program->samplers) {
+    auto* t = com::As<Texture>(d.textures[smp.reg]);
+    if (t && t->cube) cubes |= 1u << smp.reg;
+  }
+  if (!cubes) return ps;
+  auto& v = ps->variants[cubes];
+  if (v) return v.get();
+  auto program = std::make_shared<hlsl::Program>();
+  std::string err;
+  if (!hlsl::TranslateBytecode(ps->tokens.data(), ps->tokens.size(), program.get(), &err, cubes))
+    FatalF("d3d9: pixel shader with cube stages %02X: %s", cubes, err.c_str());
+  v = std::make_shared<Shader>();
+  v->device = d.guest;
+  v->pixel = true;
+  v->program = std::move(program);
+  v->id = d.gfx->CreateShader(*v->program);
+  return v.get();
+}
+
 void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   // D3D9 skips a bound vertex shader for pretransformed positions; games leave one bound over 2D quads.
   Shader* vs = Pretransformed(d) ? nullptr : com::As<Shader>(d.vs);
@@ -372,6 +396,7 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
     return;
   }
   bool ff_ps = !ps;
+  if (ps) ps = PixelVariant(d, ps);
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;
   if (auto* decl = com::As<VertexDecl>(d.decl)) {
