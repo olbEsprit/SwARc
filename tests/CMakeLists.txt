@@ -168,6 +168,12 @@ target_include_directories(wsock32_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(wsock32_test PRIVATE cxx_std_20)
 target_link_libraries(wsock32_test PRIVATE recomp_runtime)
 add_test(NAME wsock32 COMMAND wsock32_test)
+# dinput8_pad_test: dinput8's game controller on an SDL virtual gamepad.
+add_executable(dinput8_pad_test dinput8_pad_test.cpp)
+target_include_directories(dinput8_pad_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(dinput8_pad_test PRIVATE cxx_std_20)
+target_link_libraries(dinput8_pad_test PRIVATE recomp_runtime recomp_dinput8 SDL3::SDL3)
+add_test(NAME dinput8_pad COMMAND dinput8_pad_test)
 # media_player_test: an audio file on a mixer voice with a filter graph's
 # transport (runtime/audio/media_player.h), rendered offline; a synthetic
 # WAV always, a runtime-supplied file (MEDIA_PLAYER_TEST_FILE, e.g. ASF/WMA)

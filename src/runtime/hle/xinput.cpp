@@ -169,10 +169,23 @@ std::vector<XInputPad> XInputPads() {
     SDL_Gamepad* gp = g_pads[i].gp;
     if (!gp) continue;
     const char* name = SDL_GetGamepadName(gp);
-    pads.push_back({i, SDL_GetGamepadVendor(gp), SDL_GetGamepadProduct(gp),
-                    name ? name : "Controller"});
+    pads.push_back({i, SDL_GetGamepadID(gp), SDL_GetGamepadVendor(gp),
+                    SDL_GetGamepadProduct(gp), name ? name : "Controller"});
   }
   return pads;
+}
+
+bool XInputPadRead(uint32_t index, uint32_t id, PadState* out) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Pad* p = PadAt(index);
+  if (!p || SDL_GetGamepadID(p->gp) != id) return false;
+  static_assert(SDL_GAMEPAD_AXIS_COUNT == 6);
+  static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32);
+  for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; a++)
+    out->axis[a] = int16_t(SDL_GetGamepadAxis(p->gp, SDL_GamepadAxis(a)));
+  for (int b = 0; b < 32; b++)
+    out->button[b] = b < SDL_GAMEPAD_BUTTON_COUNT && SDL_GetGamepadButton(p->gp, SDL_GamepadButton(b));
+  return true;
 }
 
 }  // namespace recomp::hle
