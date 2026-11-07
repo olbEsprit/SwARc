@@ -22,7 +22,8 @@ struct FixedVertexState {
 };
 
 // HLSL (vs_3_0, entry "main") writing exactly the pixel shader's inputs;
-// its only constant is `float4x4 wvp` (c0-c3, row-major). Fatal for what
+// its only constant is `float4x4 wvp` (c0-c3, row-major), or for POSITIONT
+// `float4 vp` (c0: viewport x, y, width, height). Fatal for what
 // the generated stage does not do yet.
 std::string FixedVertexSource(const FixedVertexState& s);
 

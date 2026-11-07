@@ -12,12 +12,15 @@ std::string FixedVertexSource(const FixedVertexState& s) {
     }
     return false;
   };
-  if (has(hlsl::kPositionT, 0)) FatalF("d3d9: pretransformed vertices with a pixel shader are not supported yet");
-  if (!has(hlsl::kPosition, 0)) FatalF("d3d9: a pixel shader without a vertex shader and no position in the vertex declaration");
+  const bool rhw = has(hlsl::kPositionT, 0);
+  if (!rhw && !has(hlsl::kPosition, 0)) FatalF("d3d9: a pixel shader without a vertex shader and no position in the vertex declaration");
   if (has(hlsl::kBlendWeight, 0) || has(hlsl::kBlendIndices, 0))
     FatalF("d3d9: vertex blending in the fixed-function vertex stage with a pixel shader is not supported yet");
 
-  std::string in = "float4 pos : POSITION", out = "out float4 opos : POSITION", body = "  opos = mul(pos, wvp);\n";
+  std::string in = rhw ? "float4 pos : POSITIONT" : "float4 pos : POSITION", out = "out float4 opos : POSITION";
+  std::string body = rhw ? "  float w = pos.w == 0.0 ? 1.0 : 1.0 / pos.w;\n"
+                           "  opos = float4(((pos.x - vp.x) / vp.z * 2.0 - 1.0) * w, (1.0 - (pos.y - vp.y) / vp.w * 2.0) * w, pos.z * w, w);\n"
+                         : "  opos = mul(pos, wvp);\n";
   for (const hlsl::Semantic& v : *s.ps_inputs) {
     std::string idx = std::to_string(v.index);
     if (v.usage == hlsl::kColor && v.index < 2) {
@@ -47,7 +50,7 @@ std::string FixedVertexSource(const FixedVertexState& s) {
       FatalF("d3d9: pixel shader input (usage %u, index %u) has no fixed-function vertex output", v.usage, v.index);
     }
   }
-  return "#pragma pack_matrix(row_major)\nfloat4x4 wvp;\nvoid main(" + in + ", " + out + ") {\n" + body + "}\n";
+  return std::string("#pragma pack_matrix(row_major)\n") + (rhw ? "float4 vp;" : "float4x4 wvp;") + "\nvoid main(" + in + ", " + out + ") {\n" + body + "}\n";
 }
 
 std::vector<gfx::VertexInput> VertexInputs(const std::vector<hlsl::Semantic>& slots,

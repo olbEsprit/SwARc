@@ -412,7 +412,15 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   if (!vs) {
     FixedVertexState fv{elements, &ps->program->varyings, d.tss, d.rs[137] != 0};
     vs = Generated(d, d.ff_vertex, FixedVertexSource(fv), false);
-    WorldViewProjection(d.transforms, &ff_constants[0][0]);
+    if (Pretransformed(d)) {
+      const guest::D3DVIEWPORT9& v = d.viewport;
+      ff_constants[0][0] = float(v.X);
+      ff_constants[0][1] = float(v.Y);
+      ff_constants[0][2] = float(v.Width);
+      ff_constants[0][3] = float(v.Height);
+    } else {
+      WorldViewProjection(d.transforms, &ff_constants[0][0]);
+    }
     vs_float = ff_constants;
   } else if (!ps) {
     ps = Generated(d, d.ff_pixel, FixedFunctionPixelSource(d, *vs->program), true);

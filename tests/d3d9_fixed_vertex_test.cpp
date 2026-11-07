@@ -93,6 +93,52 @@ void Draw(gfx::Device& dev, gfx::ShaderId ps_id, const hlsl::Program& ps, float 
   dev.DestroyShader(vs_id);
 }
 
+void DrawPretransformed(gfx::Device& dev, gfx::ShaderId ps_id, const hlsl::Program& ps) {
+  struct V { float x, y, z, rhw; uint32_t c; float u, v; };
+  std::vector<guest::D3DVERTEXELEMENT9> decl = {
+      {0, 0, 3, 0, 9, 0},    // FLOAT4 POSITIONT
+      {0, 16, 4, 0, 10, 0},  // D3DCOLOR COLOR0
+      {0, 20, 1, 0, 5, 0},   // FLOAT2 TEXCOORD0
+      {0xFF, 0, 17, 0, 0, 0},
+  };
+  uint32_t tss[8][33] = {};
+  for (int s = 0; s < 8; s++) tss[s][11] = s;
+  d3d9::FixedVertexState state{&decl, &ps.varyings, tss, false};
+  std::string src = d3d9::FixedVertexSource(state);
+  hlsl::Program vs;
+  std::string errors;
+  if (!hlsl::Compile(src, {}, "main", "vs_3_0", 0, &vs, &errors)) {
+    std::fprintf(stderr, "generated vertex shader does not compile:\n%s\n%s", errors.c_str(), src.c_str());
+    std::exit(1);
+  }
+  gfx::ShaderId vs_id = dev.CreateShader(vs);
+  const float s = float(kSize);
+  float constants[4][4] = {{s / 2, s / 2, s / 2, s / 2}};
+  const V quad[4] = {{s / 2, s / 2, 0, 1, 0xFFFFFFFF, 0.5f, 0.5f}, {s, s / 2, 0, 1, 0xFFFFFFFF, 0.5f, 0.5f},
+                     {s / 2, s, 0, 1, 0xFFFFFFFF, 0.5f, 0.5f}, {s, s, 0, 1, 0xFFFFFFFF, 0.5f, 0.5f}};
+  std::vector<gfx::VertexInput> inputs = d3d9::VertexInputs(vs.inputs, decl);
+  gfx::ShaderDraw sd;
+  sd.vs = vs_id;
+  sd.ps = ps_id;
+  sd.prim = 5;
+  sd.primitives = 2;
+  sd.vertex_count = 4;
+  sd.inputs = inputs.data();
+  sd.input_count = uint32_t(inputs.size());
+  sd.streams[0] = {reinterpret_cast<const uint8_t*>(quad), sizeof quad, sizeof(V)};
+  sd.vs_float = constants;
+  static const float zero[224][4] = {};
+  sd.ps_float = zero;
+  dev.SetViewport({0, 0, kSize, kSize, 0.0f, 1.0f});
+  dev.Clear(0, nullptr, 1, 0xFF000000, 1.0f, 0);
+  dev.SetViewport({kSize / 2, kSize / 2, kSize / 2, kSize / 2, 0.0f, 1.0f});
+  dev.BeginScene();
+  dev.DrawShader(sd);
+  dev.EndScene();
+  dev.SetViewport({0, 0, kSize, kSize, 0.0f, 1.0f});
+  dev.DestroyShader(vs_id);
+}
+
 }  // namespace
 
 int main() {
@@ -139,6 +185,14 @@ int main() {
   Check((c & 0xFFFFFF) == 0, "the world transform applies (outside)", 4, 4, c);
   c = Pixel(*dev, 32, 32);
   Check(std::abs(int(c & 0xFF) - 128) <= 2, "the world transform applies (inside)", 32, 32, c);
+
+  // POSITIONT pixels of a quarter of the target, through a viewport offset by its quadrant.
+  DrawPretransformed(*dev, ps_id, ps);
+  c = Pixel(*dev, 8, 8);
+  Check((c & 0xFFFFFF) == 0, "pretransformed: outside the quad", 8, 8, c);
+  c = Pixel(*dev, 48, 48);
+  Check(std::abs(int(c >> 16 & 0xFF) - 128) <= 8 && std::abs(int(c & 0xFF) - 128) <= 2,
+        "pretransformed: inside the quad", 48, 48, c);
 
   dev.reset();
   SDL_DestroyWindow(win);
