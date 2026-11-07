@@ -10,6 +10,7 @@
 #include <cstring>
 #include <vector>
 
+#include "runtime/gfx/hud.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/log.h"
 #include "runtime/runtime.h"
@@ -29,6 +30,12 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
     const char* e = Env("SHOT_FROM");
     return e ? std::atoi(e) : 0;
   }();
+  static const bool hud_init = [] {
+    const char* e = Env("HUD");
+    if (e && *e == '0') gfx::g_hud_on = false;
+    return true;
+  }();
+  (void)hud_init;
   static int frame = 0;
   frame++;
   if (every > 0 && frame >= from && frame % every == 0) {

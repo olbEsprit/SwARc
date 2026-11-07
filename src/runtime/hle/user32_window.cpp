@@ -29,6 +29,7 @@
 #include "runtime/hle/input_state.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/present.h"
+#include "runtime/gfx/hud.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
@@ -464,6 +465,10 @@ void HandleSdlEvent(const SDL_Event& e) {
       if (h && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
           e.key.scancode == SDL_SCANCODE_F && (e.key.mod & SDL_KMOD_GUI)) {
         ToggleHostFullscreen(h);
+        break;
+      }
+      if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
+        gfx::g_hud_on = !gfx::g_hud_on;
         break;
       }
       uint8_t vk = VkFromScancode(e.key.scancode);
