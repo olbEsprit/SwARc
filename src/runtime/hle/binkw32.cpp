@@ -446,8 +446,9 @@ HLE_NAMED("binkw32.dll", "_BinkClose@4", BinkClose, 1) {
     m = std::move(it->second);
     g_movies.erase(it);
   }
-  WarnF("binkw32: BinkClose at frame %u/%u (from %08X)\n", m->frame_num,
-        m->frames, Rd32(c.esp));
+  const double shown = m->started ? std::chrono::duration<double>(Clock::now() - m->start).count() : 0;
+  WarnF("binkw32: BinkClose at frame %u/%u after %.2f s, its time %.2f s (from %08X)\n", m->frame_num,
+        m->frames, shown, m->frame_num / m->fps, Rd32(c.esp));
   return 0;  // the guest block is leaked: 512 bytes per movie
 }
 
