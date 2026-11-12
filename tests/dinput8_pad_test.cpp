@@ -36,6 +36,7 @@ Ctx g_ctx;
 struct Instance {
   uint8_t guid[16];
   uint32_t devtype;
+  std::string product;
 };
 struct Object {
   uint32_t ofs, type, flags;
@@ -48,7 +49,9 @@ HLE_NAMED("dinput8test.dll", "EnumDevicesCb", TestEnumDevicesCb, 2) {
   Instance i;
   std::memcpy(i.guid, di + 4, 16);
   std::memcpy(&i.devtype, di + 0x24, 4);
-  g_instances.push_back(i);
+  i.product = reinterpret_cast<const char*>(di + 0x12C);
+  // Real pads on the test host are listed too: keep the keyboard and the virtual pad.
+  if ((i.devtype & 0xFF) != 0x15 || i.product == "Virtual DualSense") g_instances.push_back(i);
   return 1;
 }
 
