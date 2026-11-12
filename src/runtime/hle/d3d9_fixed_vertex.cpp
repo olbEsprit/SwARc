@@ -24,7 +24,11 @@ std::string FixedVertexSource(const FixedVertexState& s) {
   for (const hlsl::Semantic& v : *s.ps_inputs) {
     std::string idx = std::to_string(v.index);
     if (v.usage == hlsl::kColor && v.index < 2) {
-      if (s.lighting) FatalF("d3d9: lighting in the fixed-function vertex stage with a pixel shader that reads COLOR%u is not supported yet", v.index);
+      static bool warned = false;
+      if (s.lighting && !warned) {
+        warned = true;
+        WarnF("d3d9: lighting in the fixed-function vertex stage with a pixel shader is not done yet: drawn unlit\n");
+      }
       std::string o = "o_c" + idx;
       out += ", out float4 " + o + " : COLOR" + idx;
       if (has(hlsl::kColor, v.index)) {
