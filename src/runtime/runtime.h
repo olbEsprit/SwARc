@@ -85,9 +85,11 @@ struct GameConfig {
 
   // Bytes written over the mapped image before it runs (whatever the
   // section's protection), e.g. a game's tunables for the host screen.
+  // `expect` holds the image's bytes there; another build of the EXE is
+  // fatal rather than patched blindly.
   struct ImagePatch {
     uint32_t va;
-    std::vector<uint8_t> bytes;
+    std::vector<uint8_t> bytes, expect;
   };
   std::vector<ImagePatch> image_patches;
 };

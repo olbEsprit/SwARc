@@ -414,6 +414,8 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
     const uint64_t n = patch.bytes.size();
     if (patch.va < p.img.image_base || patch.va + n > p.img.image_base + p.img.image_size)
       FatalF("image patch at 0x%x is outside the image", patch.va);
+    if (patch.expect.size() != n || std::memcmp(p.mem.ptr(patch.va), patch.expect.data(), n) != 0)
+      FatalF("image patch at 0x%x: the image holds other bytes there (another build of the EXE?)", patch.va);
     const Prot prot = p.mem.QueryProt(patch.va);
     p.mem.Protect(patch.va, n, Prot::RW);
     std::memcpy(p.mem.ptr(patch.va), patch.bytes.data(), n);
