@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "runtime/gfx/device.h"
+#include "runtime/gfx/hud.h"
 #include "runtime/gfx/shader_compile.h"
 #include "runtime/log.h"
 
@@ -423,12 +424,12 @@ class GpuDevice final : public Device {
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
     for (auto& [id, d] : depths_) SDL_ReleaseGPUTexture(dev_, d.tex);
-    for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_})
+    for (SDL_GPUTexture* t : {backbuffer_, front_, hud_tex_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_})
       if (t) SDL_ReleaseGPUTexture(dev_, t);
     for (auto& b : blit_pool_) SDL_ReleaseGPUTexture(dev_, b.tex);
     for (SDL_GPUBuffer* b : {vbuf_, ibuf_})
       if (b) SDL_ReleaseGPUBuffer(dev_, b);
-    for (SDL_GPUTransferBuffer* b : {upload_tb_, download_tb_})
+    for (SDL_GPUTransferBuffer* b : {upload_tb_, download_tb_, hud_tb_})
       if (b) SDL_ReleaseGPUTransferBuffer(dev_, b);
     if (vs_) SDL_ReleaseGPUShader(dev_, vs_);
     if (fs_) SDL_ReleaseGPUShader(dev_, fs_);
@@ -1346,6 +1347,7 @@ void r_color0(inout vec4 c) {
 
   void Present() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    if (g_hud_on) hud_.NoteFrame();
     Flush();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
@@ -1887,7 +1889,59 @@ void r_color0(inout vec4 c) {
     }
     b.filter = (w % bb_w_ == 0 && h % bb_h_ == 0) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     SDL_BlitGPUTexture(cmd, &b);
+    if (g_hud_on) DrawHud(cmd, sc, sh);
     NotePresentation({bb_w_, bb_h_, int(sw), int(sh), r});
+  }
+
+  void DrawHud(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* sc, Uint32 sh) {
+    if (!hud_tex_) {
+      SDL_GPUTextureCreateInfo ti{};
+      ti.type = SDL_GPU_TEXTURETYPE_2D;
+      ti.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+      ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+      ti.width = Hud::kW;
+      ti.height = Hud::kH;
+      ti.layer_count_or_depth = 1;
+      ti.num_levels = 1;
+      hud_tex_ = SDL_CreateGPUTexture(dev_, &ti);
+      SDL_GPUTransferBufferCreateInfo bi{};
+      bi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+      bi.size = Hud::kW * Hud::kH * 4;
+      hud_tb_ = SDL_CreateGPUTransferBuffer(dev_, &bi);
+      if (!hud_tex_ || !hud_tb_) return;
+    }
+    if (hud_.dirty()) {
+      void* m = SDL_MapGPUTransferBuffer(dev_, hud_tb_, true);
+      if (m) {
+        std::memcpy(m, hud_.pixels(), size_t(Hud::kW) * Hud::kH * 4);
+        SDL_UnmapGPUTransferBuffer(dev_, hud_tb_);
+        SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUTextureTransferInfo src{};
+        src.transfer_buffer = hud_tb_;
+        SDL_GPUTextureRegion dst{};
+        dst.texture = hud_tex_;
+        dst.w = Hud::kW;
+        dst.h = Hud::kH;
+        dst.d = 1;
+        SDL_UploadToGPUTexture(cp, &src, &dst, true);
+        SDL_EndGPUCopyPass(cp);
+        hud_ready_ = true;
+      }
+    }
+    if (!hud_ready_) return;
+    const Uint32 k = std::max<Uint32>(2, (sh + 240) / 480);
+    SDL_GPUBlitInfo b{};
+    b.source.texture = hud_tex_;
+    b.source.w = Hud::kW;
+    b.source.h = Hud::kH;
+    b.destination.texture = sc;
+    b.destination.x = k * 2;
+    b.destination.y = k * 2;
+    b.destination.w = Hud::kW * k;
+    b.destination.h = Hud::kH * k;
+    b.load_op = SDL_GPU_LOADOP_LOAD;
+    b.filter = SDL_GPU_FILTER_NEAREST;
+    SDL_BlitGPUTexture(cmd, &b);
   }
 
   void ReadTexture(SDL_GPUTexture* tex, int tw, int th, const Rect& r, void* dst, uint32_t pitch,
@@ -2557,6 +2611,10 @@ void r_color0(inout vec4 c) {
   SDL_GPUTextureFormat depth24s8_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
   SDL_GPUTexture* backbuffer_ = nullptr;  // the game's back buffer
   SDL_GPUTexture* front_ = nullptr;       // the DirectDraw primary
+  Hud hud_;
+  SDL_GPUTexture* hud_tex_ = nullptr;
+  SDL_GPUTransferBuffer* hud_tb_ = nullptr;
+  bool hud_ready_ = false;
   SDL_GPUTexture* dummy_ = nullptr;
   int bb_w_ = 0, bb_h_ = 0;
   // Mailbox emulated on vsync (ResetSwapChain, Show).
