@@ -410,6 +410,15 @@ int RunProcess(const GameConfig& game, const std::string& exe_path,
   std::string err;
   if (!p.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
     FatalF("%s", err.c_str());
+  for (const GameConfig::ImagePatch& patch : game.image_patches) {
+    const uint64_t n = patch.bytes.size();
+    if (patch.va < p.img.image_base || patch.va + n > p.img.image_base + p.img.image_size)
+      FatalF("image patch at 0x%x is outside the image", patch.va);
+    const Prot prot = p.mem.QueryProt(patch.va);
+    p.mem.Protect(patch.va, n, Prot::RW);
+    std::memcpy(p.mem.ptr(patch.va), patch.bytes.data(), n);
+    p.mem.Protect(patch.va, n, prot);
+  }
   for (const auto& d : game.lifted_dlls) {
     Module& m = p.modules.emplace_back();
     m.name = hle::NormaliseDll(d.name);

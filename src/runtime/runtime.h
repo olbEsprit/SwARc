@@ -82,6 +82,14 @@ struct GameConfig {
     int button;
   };
   std::vector<PadButton> pad_buttons;
+
+  // Bytes written over the mapped image before it runs (whatever the
+  // section's protection), e.g. a game's tunables for the host screen.
+  struct ImagePatch {
+    uint32_t va;
+    std::vector<uint8_t> bytes;
+  };
+  std::vector<ImagePatch> image_patches;
 };
 
 // The running game's configuration (valid once RunProcess has started).
