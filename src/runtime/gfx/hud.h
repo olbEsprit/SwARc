@@ -1,6 +1,6 @@
 #pragma once
 // Frame-time overlay: a small CPU-drawn label the backend blits over the
-// window after the game's frame. <ID>_HUD=0 turns it off, F3 toggles it.
+// window after the game's frame. Off unless <ID>_HUD=1; F3 toggles it.
 
 #include <SDL3/SDL.h>
 
@@ -13,7 +13,7 @@
 
 namespace recomp::gfx {
 
-inline std::atomic<bool> g_hud_on{true};
+inline std::atomic<bool> g_hud_on{false};
 
 class Hud {
  public:

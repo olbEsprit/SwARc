@@ -32,7 +32,7 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
   }();
   static const bool hud_init = [] {
     const char* e = Env("HUD");
-    if (e && *e == '0') gfx::g_hud_on = false;
+    if (e && *e == '1') gfx::g_hud_on = true;
     return true;
   }();
   (void)hud_init;
