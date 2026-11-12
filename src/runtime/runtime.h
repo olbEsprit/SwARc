@@ -72,6 +72,16 @@ struct GameConfig {
     uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
   };
   std::vector<LiftedDll> lifted_dlls;
+
+  // DirectInput action maps on pads: DIBUTTON_ANY(n) is the pad's button n
+  // in its c_dfDIJoystick2 order. A game whose menus expect other buttons
+  // for its semantics names them here (an SDL_GamepadButton each, -1 for
+  // none).
+  struct PadButton {
+    uint32_t semantic;
+    int button;
+  };
+  std::vector<PadButton> pad_buttons;
 };
 
 // The running game's configuration (valid once RunProcess has started).

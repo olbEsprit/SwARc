@@ -1,12 +1,14 @@
 // dinput8's game controller on an SDL virtual gamepad, through the thunk
 // dispatch: enumeration, the c_dfDIJoystick2 state with the ranges a game
-// sets, the POV, unsupported force feedback, and unplugging.
+// sets, the POV, action maps and their buffered events, unsupported force
+// feedback, and unplugging.
 
 #include <SDL3/SDL.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -112,6 +114,39 @@ uint32_t OpenDevice(uint32_t out) {
   Check(Call("IDirectInputDevice8A::SetDataFormat", {dev, kFormat}) == 0, "SetDataFormat");
   Check(Call("IDirectInputDevice8A::SetCooperativeLevel", {dev, 0, kCooperativeFg}) == 0, "SetCooperativeLevel");
   return dev;
+}
+
+// An action format at kActionFormat: one DIACTION (40 bytes) a semantic,
+// uAppData its index; range -100..100, 32 events buffered.
+constexpr uint32_t kActionFormat = kScratch + 0x400, kActions = kScratch + 0x500, kEvents = kScratch + 0x800,
+                   kCount = kScratch + 0xC00;
+void WriteFormat(uint32_t genre, const std::vector<uint32_t>& semantics) {
+  std::memset(GPtr(kActionFormat), 0, 0x100);
+  std::memset(GPtr(kActions), 0, 40 * semantics.size());
+  Wr(kActionFormat, 0x14C);
+  Wr(kActionFormat + 4, 40);
+  Wr(kActionFormat + 8, 4 * uint32_t(semantics.size()));
+  Wr(kActionFormat + 12, uint32_t(semantics.size()));
+  Wr(kActionFormat + 16, kActions);
+  Wr(kActionFormat + 0x24, genre);
+  Wr(kActionFormat + 0x28, 32);
+  Wr(kActionFormat + 0x2C, uint32_t(-100));
+  Wr(kActionFormat + 0x30, 100);
+  for (size_t i = 0; i < semantics.size(); i++) {
+    Wr(kActions + 40 * uint32_t(i), uint32_t(i));
+    Wr(kActions + 40 * uint32_t(i) + 4, semantics[i]);
+  }
+}
+uint32_t ActionHow(int i) { return Rd(kActions + 40 * i + 36); }
+uint32_t ActionObj(int i) { return Rd(kActions + 40 * i + 32); }
+
+// The buffered events since the last call: uAppData -> the last value.
+std::vector<std::pair<uint32_t, int32_t>> Events(uint32_t dev) {
+  Wr(kCount, 32);
+  Check(Call("IDirectInputDevice8A::GetDeviceData", {dev, 20, kEvents, kCount, 0}) == 0, "GetDeviceData");
+  std::vector<std::pair<uint32_t, int32_t>> out;
+  for (uint32_t i = 0; i < Rd(kCount); i++) out.push_back({Rd(kEvents + 20 * i + 16), int32_t(Rd(kEvents + 20 * i + 4))});
+  return out;
 }
 
 void Press(SDL_Joystick* j, SDL_GamepadButton b, bool down) {
@@ -249,12 +284,77 @@ int main() {
   Check(Call("IDirectInputDevice8A::SendForceFeedbackCommand", {dev, 0x10}) == DIERR_UNSUPPORTED,
         "force feedback is unsupported");
 
+  // A driving action map: steer, accelerate, brake, the stick's Y (left
+  // unmapped while the stick steers), DIBUTTON_ANY(0) moved to cross by the game's
+  // pad_buttons, ANY(3), the menu button, a keyboard semantic, ANY(2)
+  // left out by pad_buttons.
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_LEFT, false);
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTX, 0);
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTY, 0);
+  Push(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);  // a virtual trigger's rest
+  Push(joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
+  Press(joy, SDL_GAMEPAD_BUTTON_SOUTH, false);
+  Press(joy, SDL_GAMEPAD_BUTTON_START, false);
+  proc.game.pad_buttons = {{0xFF004400, SDL_GAMEPAD_BUTTON_SOUTH}, {0xFF004402, -1}};
+  uint32_t mdev = OpenDevice(kDev2 + 0x20);
+  WriteFormat(0x01000000, {0x01008A01, 0x01039202, 0x01041203, 0xFF014201, 0xFF004400, 0xFF004403, 0x010004FD,
+                           0x810000C8, 0xFF004402});
+  Check(Call("IDirectInputDevice8A::BuildActionMap", {mdev, kActionFormat, 0, 0}) == 0, "BuildActionMap");
+  Check(ActionObj(0) == 0x002 && ActionObj(1) == 0x402 && ActionObj(2) == 0x302, "steer X, accelerate Ry, brake Rx");
+  Check(ActionHow(3) == 0 && ActionHow(7) == 0 && ActionHow(8) == 0,
+        "no stick Y while it steers, no keyboard semantic on a pad, ANY(2) unmapped by pad_buttons");
+  Check(ActionObj(4) == 0x104 && ActionObj(5) == 0x304 && ActionObj(6) == 0x904,
+        "ANY(0) on cross (pad_buttons), ANY(3) the pad's button 3, menu on options");
+  Check(ActionHow(0) == 0x20 && std::memcmp(GPtr(kActions + 16), g_instances[0].guid, 16) == 0,
+        "mapped to this pad");
+  Check(Call("IDirectInputDevice8A::SetActionMap", {mdev, kActionFormat, 0, 0}) == 0, "SetActionMap");
+  Check(Call("IDirectInputDevice8A::Acquire", {mdev}) == 0, "Acquire with an action map");
+  Check(Events(mdev).empty(), "at rest: no events");
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTX, 32767);
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTY, 32767);
+  Push(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 32767);
+  Push(joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 0);  // half way
+  Press(joy, SDL_GAMEPAD_BUTTON_SOUTH, true);
+  Press(joy, SDL_GAMEPAD_BUTTON_START, true);
+  auto ev = Events(mdev);
+  std::map<uint32_t, int32_t> got(ev.begin(), ev.end());
+  Check(ev.size() == 5 && got[0] == 100 && got[1] == -100 && got[2] == -50 && got[4] == 0x80 && got[6] == 0x80,
+        "steer right 100, triggers from 0 down to -100, buttons 0x80");
+  Check(Events(mdev).empty(), "unchanged: no events");
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTX, 3000);
+  ev = Events(mdev);
+  Check(ev.size() == 1 && ev[0].first == 0 && ev[0].second == 0, "a stick inside the dead zone: centred");
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTX, -32768);
+  ev = Events(mdev);
+  Check(ev.size() == 1 && ev[0].second == -100, "past it: the full range");
+  Press(joy, SDL_GAMEPAD_BUTTON_SOUTH, false);
+  ev = Events(mdev);
+  Check(ev.size() == 1 && ev[0].first == 4 && ev[0].second == 0, "a button let go");
+  Call("IDirectInputDevice8A::Unacquire", {mdev});
+
+  // A menu map in the driving genre (no steering): the stick's Y maps,
+  // and the D-pad drives DIAXIS_ANY_X_1 and _Y_1 to their ends.
+  WriteFormat(0x01000000, {0xFF00C201, 0xFF014201});
+  Call("IDirectInputDevice8A::BuildActionMap", {mdev, kActionFormat, 0, 0});
+  Check(ActionObj(0) == 0x002 && ActionObj(1) == 0x102, "menus: ANY_X_1 on X, ANY_Y_1 on Y");
+  Call("IDirectInputDevice8A::SetActionMap", {mdev, kActionFormat, 0, 0});
+  Call("IDirectInputDevice8A::Acquire", {mdev});
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTX, 0);
+  Push(joy, SDL_GAMEPAD_AXIS_LEFTY, 0);
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_LEFT, true);
+  ev = Events(mdev);
+  Check(ev.size() == 1 && ev[0].first == 0 && ev[0].second == -100, "D-pad left: ANY_X_1 at -100");
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_LEFT, false);
+  Press(joy, SDL_GAMEPAD_BUTTON_START, false);
+  Push(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
+  Push(joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
+
   SDL_DetachVirtualJoystick(id);
   SDL_UpdateJoysticks();
   Check(Call("IDirectInputDevice8A::GetDeviceState", {dev, 272, kState}) == DIERR_UNPLUGGED, "unplugged state");
   Check(Call("IDirectInputDevice8A::Poll", {dev}) == DIERR_UNPLUGGED, "unplugged poll");
 
-  for (uint32_t d : {dev, dev2, Rd(kIfc)})
+  for (uint32_t d : {dev, dev2, mdev, Rd(kIfc)})
     Call(d == Rd(kIfc) ? "IDirectInput8A::Release" : "IDirectInputDevice8A::Release", {d});
 
   if (!failures) std::puts("dinput8 pad OK");
