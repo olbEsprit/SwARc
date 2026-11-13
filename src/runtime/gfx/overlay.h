@@ -38,6 +38,9 @@ bool CapturesPad();
 // The menu's minimum anisotropy for mipmapped linear sampling; 0: the game's.
 int Anisotropy();
 
+// The pads' sticks' dead zone, in percent of the throw.
+int StickDeadZone();
+
 // 0 off, 1 FPS, 2 frame times, presentation and shader compiles.
 int TelemetryMode();
 void SetTelemetry(int mode);

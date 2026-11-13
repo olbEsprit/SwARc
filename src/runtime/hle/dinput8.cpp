@@ -20,6 +20,7 @@
 #include <mutex>
 #include <set>
 
+#include "runtime/gfx/overlay.h"
 #include "runtime/hle/com.h"
 #include "runtime/hle/hle.h"
 #include "runtime/hle/input_state.h"
@@ -420,7 +421,7 @@ int32_t PadActionValue(const PadState& s, const InputDevice::PadAction& a, int32
                                                    SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, SDL_GAMEPAD_AXIS_RIGHTY};
   int64_t v = i == kAxisRx || i == kAxisRy ? trigger(s.axis[kStick[i]]) : s.axis[kStick[i]];
   if (i != kAxisRx && i != kAxisRy) {
-    constexpr int64_t kDeadZone = 32767 * 12 / 100;
+    const int64_t kDeadZone = 32767 * gfx::overlay::StickDeadZone() / 100;
     const int64_t m = std::min<int64_t>(std::abs(v), 32767);
     v = m <= kDeadZone ? 0 : (v < 0 ? -1 : 1) * (m - kDeadZone) * 32767 / (32767 - kDeadZone);
   }
