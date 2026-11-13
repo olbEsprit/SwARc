@@ -230,7 +230,8 @@ void Identity(float* m) {
 }
 }  // namespace
 
-FfState DefaultFfState() {
+namespace {
+FfState MakeDefaultFfState() {
   FfState s;
   std::memset(&s, 0, sizeof s);
   uint32_t* rs = s.rs;
@@ -278,6 +279,12 @@ FfState DefaultFfState() {
   Identity(s.proj);
   for (auto& m : s.tex) Identity(m);
   s.viewport = {0, 0, 1, 1, 0, 1};
+  return s;
+}
+}  // namespace
+
+FfState DefaultFfState() {
+  static const FfState s = MakeDefaultFfState();
   return s;
 }
 

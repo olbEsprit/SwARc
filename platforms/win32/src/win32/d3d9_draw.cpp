@@ -430,7 +430,18 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
     }
     vs_float = ff_constants;
   } else if (!ps) {
-    ps = Generated(d, d.ff_pixel, FixedFunctionPixelSource(d, *vs->program), true);
+    // What FixedFunctionPixelSource reads, so the source is built once per state.
+    std::vector<uint64_t> key{d.rs[29]};
+    for (const hlsl::Semantic& v : vs->program->varyings) key.push_back(uint64_t(v.usage) << 32 | v.index);
+    key.push_back(~0ull);
+    for (uint32_t s = 0; s < 8 && d.tss[s][1] != 1; s++) {
+      auto* t = com::As<Texture>(d.textures[s]);
+      for (int i : {1, 2, 3, 4, 5, 6, 11, 24, 26, 27, 28}) key.push_back(d.tss[s][i]);
+      key.push_back(t ? (t->cube ? 2 : 1) : 0);
+    }
+    Shader*& cached = d.ff_pixel_by_state[key];
+    if (!cached) cached = Generated(d, d.ff_pixel, FixedFunctionPixelSource(d, *vs->program), true);
+    ps = cached;
   }
   std::vector<gfx::VertexInput> inputs = VertexInputs(vs->program->inputs, *elements);
   sd.inputs = inputs.data();

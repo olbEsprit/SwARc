@@ -36,10 +36,12 @@ uint32_t Publish(std::shared_ptr<Object> obj, uint32_t vtable);
 // Host object behind a guest interface pointer (nullptr if not ours).
 std::shared_ptr<Object> Lookup(uint32_t guest);
 
+// Lookup without the lock, for the hot paths (kept alive by its references).
+Object* Find(uint32_t guest);
+
 template <typename T>
 T* As(uint32_t guest) {
-  auto o = Lookup(guest);
-  return dynamic_cast<T*>(o.get());
+  return dynamic_cast<T*>(Find(guest));
 }
 
 uint32_t AddRef(uint32_t guest);

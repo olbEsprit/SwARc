@@ -189,6 +189,7 @@ struct Device : com::Object {
   // Pixel shaders generated for a vertex shader and the fixed-function
   // pixel stage, by source (never published to the guest).
   std::map<std::string, std::shared_ptr<Shader>> ff_pixel;
+  std::map<std::vector<uint64_t>, Shader*> ff_pixel_by_state;  // into ff_pixel
   // The converse: vertex shaders generated for a pixel shader and the
   // fixed-function vertex stage.
   std::map<std::string, std::shared_ptr<Shader>> ff_vertex;

@@ -1,5 +1,6 @@
 #include "win32/com.h"
 
+#include <atomic>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -18,6 +19,18 @@ std::recursive_mutex g_mu;
 std::map<std::string, uint32_t> g_vtables;
 std::map<uint32_t, std::shared_ptr<Object>> g_objects;  // by guest pointer
 std::vector<std::pair<guest::GUID, CreateFn>> g_classes;
+
+// Published objects by slot, the slot's index in the guest block at +12: As
+// finds an object without the lock (one per draw call adds up).
+constexpr uint32_t kSlotChunk = 4096, kSlotChunks = 1024;
+std::atomic<std::atomic<Object*>*> g_slots[kSlotChunks];
+std::vector<uint32_t> g_free_slots;
+uint32_t g_next_slot = 1;
+
+std::atomic<Object*>* Slot(uint32_t i) {
+  std::atomic<Object*>* chunk = g_slots[i / kSlotChunk].load(std::memory_order_acquire);
+  return chunk ? &chunk[i % kSlotChunk] : nullptr;
+}
 
 }  // namespace
 
@@ -41,8 +54,33 @@ uint32_t Publish(std::shared_ptr<Object> obj, uint32_t vtable) {
   Wr32(p + 8, p);
   obj->guest = p;
   std::lock_guard<std::recursive_mutex> l(g_mu);
+  uint32_t slot;
+  if (!g_free_slots.empty()) {
+    slot = g_free_slots.back();
+    g_free_slots.pop_back();
+  } else {
+    slot = g_next_slot++;
+    if (slot / kSlotChunk >= kSlotChunks) FatalF("com: more than %u objects", kSlotChunk * kSlotChunks);
+    if (!Slot(slot))
+      g_slots[slot / kSlotChunk].store(new std::atomic<Object*>[kSlotChunk](), std::memory_order_release);
+  }
+  Slot(slot)->store(obj.get(), std::memory_order_release);
+  Wr32(p + 12, slot);
   g_objects[p] = std::move(obj);
   return p;
+}
+
+Object* Find(uint32_t guest) {
+  if (!guest) return nullptr;
+  if (guest >= 0x10000 && Rd32(guest + 4) == kMagic && Rd32(guest + 8) == guest) {
+    const uint32_t slot = Rd32(guest + 12);
+    if (slot / kSlotChunk < kSlotChunks)
+      if (std::atomic<Object*>* s = Slot(slot)) {
+        Object* o = s->load(std::memory_order_acquire);
+        if (o && o->guest == guest) return o;
+      }
+  }
+  return Lookup(guest).get();
 }
 
 std::shared_ptr<Object> Lookup(uint32_t guest) {
@@ -69,6 +107,11 @@ uint32_t Release(uint32_t guest) {
     if (!left) {
       dead = it->second;
       g_objects.erase(it);
+      const uint32_t slot = Rd32(guest + 12);
+      if (std::atomic<Object*>* s = Slot(slot); s && s->load() == dead.get()) {
+        s->store(nullptr, std::memory_order_release);
+        g_free_slots.push_back(slot);
+      }
       // Poison the guest block so a use-after-release is caught.
       Wr32(guest, 0);
       Wr32(guest + 4, 0);
