@@ -182,6 +182,7 @@ add_library(recomp_gfx SHARED
   src/runtime/gfx/format.cpp
   src/runtime/gfx/device.cpp
   src/runtime/gfx/gpu_device.cpp
+  src/runtime/gfx/overlay.cpp
   src/runtime/gfx/shader_compile.cpp)
 target_include_directories(recomp_gfx PUBLIC src)
 target_compile_features(recomp_gfx PUBLIC cxx_std_20)
@@ -261,7 +262,7 @@ target_link_libraries(recomp_d3d7 PUBLIC recomp_runtime recomp_gfx)
 # XInput 1.3 on SDL gamepads, and the WMI that tells games which
 # DirectInput game controllers are XInput pads.
 add_library(recomp_xinput SHARED src/runtime/hle/xinput.cpp src/runtime/hle/wbem.cpp)
-target_link_libraries(recomp_xinput PUBLIC recomp_runtime)
+target_link_libraries(recomp_xinput PUBLIC recomp_runtime PRIVATE recomp_gfx)
 
 # DirectInput 8 (keyboard and mouse) on the event pump's raw input; it
 # lists the XInput pads as game controllers.

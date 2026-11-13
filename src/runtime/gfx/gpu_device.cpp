@@ -35,7 +35,7 @@
 #include <vector>
 
 #include "runtime/gfx/device.h"
-#include "runtime/gfx/hud.h"
+#include "runtime/gfx/overlay.h"
 #include "runtime/gfx/shader_compile.h"
 #include "runtime/log.h"
 
@@ -424,13 +424,15 @@ class GpuDevice final : public Device {
     for (auto& [k, s] : samplers_) SDL_ReleaseGPUSampler(dev_, s);
     for (auto& [id, t] : textures_) SDL_ReleaseGPUTexture(dev_, t.tex);
     for (auto& [id, d] : depths_) SDL_ReleaseGPUTexture(dev_, d.tex);
-    for (SDL_GPUTexture* t : {backbuffer_, front_, hud_tex_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_})
+    for (SDL_GPUTexture* t : {backbuffer_, front_, dummy_, dummy_2d_, dummy_cube_, dummy_3d_})
       if (t) SDL_ReleaseGPUTexture(dev_, t);
     for (auto& b : blit_pool_) SDL_ReleaseGPUTexture(dev_, b.tex);
     for (SDL_GPUBuffer* b : {vbuf_, ibuf_})
       if (b) SDL_ReleaseGPUBuffer(dev_, b);
-    for (SDL_GPUTransferBuffer* b : {upload_tb_, download_tb_, hud_tb_})
+    for (SDL_GPUTransferBuffer* b : {upload_tb_, download_tb_})
       if (b) SDL_ReleaseGPUTransferBuffer(dev_, b);
+    ReleaseLayer(tele_);
+    ReleaseLayer(menu_);
     if (vs_) SDL_ReleaseGPUShader(dev_, vs_);
     if (fs_) SDL_ReleaseGPUShader(dev_, fs_);
     SDL_ReleaseWindowFromGPUDevice(dev_, window_);
@@ -1130,6 +1132,7 @@ void r_color0(inout vec4 c) {
 
   ShaderId CreateShader(const hlsl::Program& prog) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
+    const uint64_t t0 = SDL_GetTicksNS();
     Shader sh;
     sh.stage = prog.stage;
     sh.inputs = prog.inputs.size();
@@ -1170,6 +1173,7 @@ void r_color0(inout vec4 c) {
     if (!sh.sh) FatalF("gfx: SDL_CreateGPUShader (translated): %s", SDL_GetError());
     ShaderId id = next_id_++;
     shaders_[id] = sh;
+    overlay::NoteShaderCompile(double(SDL_GetTicksNS() - t0) / 1e6);
     return id;
   }
 
@@ -1347,7 +1351,7 @@ void r_color0(inout vec4 c) {
 
   void Present() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    if (g_hud_on) hud_.NoteFrame();
+    const uint64_t t0 = SDL_GetTicksNS();
     Flush();
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(dev_);
     SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
@@ -1358,6 +1362,7 @@ void r_color0(inout vec4 c) {
     SDL_EndGPUCopyPass(cp);
     Show(cmd);
     Submit(cmd);
+    if (overlay::TelemetryMode()) overlay::NoteFrame(double(SDL_GetTicksNS() - t0) / 1e6, bb_w_, bb_h_);
   }
 
  private:
@@ -1889,56 +1894,82 @@ void r_color0(inout vec4 c) {
     }
     b.filter = (w % bb_w_ == 0 && h % bb_h_ == 0) ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
     SDL_BlitGPUTexture(cmd, &b);
-    if (g_hud_on) DrawHud(cmd, sc, sh);
+    const Uint32 k = std::max<Uint32>(2, (sh + 240) / 480);
+    if (overlay::Telemetry(&tele_.l)) DrawLayer(cmd, sc, tele_, k * 2, k * 2, k);
+    if (overlay::Menu(&menu_.l)) {
+      const Uint32 mw = Uint32(menu_.l.w) * k, mh = Uint32(menu_.l.h) * k;
+      DrawLayer(cmd, sc, menu_, sw > mw ? (sw - mw) / 2 : 0, sh > mh ? (sh - mh) / 3 : 0, k);
+    }
     NotePresentation({bb_w_, bb_h_, int(sw), int(sh), r});
   }
 
-  void DrawHud(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* sc, Uint32 sh) {
-    if (!hud_tex_) {
+  struct GpuLayer {
+    overlay::Layer l;
+    SDL_GPUTexture* tex = nullptr;
+    SDL_GPUTransferBuffer* tb = nullptr;
+    int w = 0, h = 0;
+    uint64_t version = 0;
+  };
+
+  void ReleaseLayer(GpuLayer& g) {
+    if (g.tex) SDL_ReleaseGPUTexture(dev_, g.tex);
+    if (g.tb) SDL_ReleaseGPUTransferBuffer(dev_, g.tb);
+    g.tex = nullptr;
+    g.tb = nullptr;
+  }
+
+  void DrawLayer(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* sc, GpuLayer& g, Uint32 x, Uint32 y, Uint32 k) {
+    if (g.l.w <= 0 || g.l.h <= 0) return;
+    if (g.w != g.l.w || g.h != g.l.h) {
+      ReleaseLayer(g);
       SDL_GPUTextureCreateInfo ti{};
       ti.type = SDL_GPU_TEXTURETYPE_2D;
       ti.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
       ti.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-      ti.width = Hud::kW;
-      ti.height = Hud::kH;
+      ti.width = Uint32(g.l.w);
+      ti.height = Uint32(g.l.h);
       ti.layer_count_or_depth = 1;
       ti.num_levels = 1;
-      hud_tex_ = SDL_CreateGPUTexture(dev_, &ti);
+      g.tex = SDL_CreateGPUTexture(dev_, &ti);
       SDL_GPUTransferBufferCreateInfo bi{};
       bi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-      bi.size = Hud::kW * Hud::kH * 4;
-      hud_tb_ = SDL_CreateGPUTransferBuffer(dev_, &bi);
-      if (!hud_tex_ || !hud_tb_) return;
-    }
-    if (hud_.dirty()) {
-      void* m = SDL_MapGPUTransferBuffer(dev_, hud_tb_, true);
-      if (m) {
-        std::memcpy(m, hud_.pixels(), size_t(Hud::kW) * Hud::kH * 4);
-        SDL_UnmapGPUTransferBuffer(dev_, hud_tb_);
-        SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-        SDL_GPUTextureTransferInfo src{};
-        src.transfer_buffer = hud_tb_;
-        SDL_GPUTextureRegion dst{};
-        dst.texture = hud_tex_;
-        dst.w = Hud::kW;
-        dst.h = Hud::kH;
-        dst.d = 1;
-        SDL_UploadToGPUTexture(cp, &src, &dst, true);
-        SDL_EndGPUCopyPass(cp);
-        hud_ready_ = true;
+      bi.size = Uint32(g.l.w * g.l.h * 4);
+      g.tb = SDL_CreateGPUTransferBuffer(dev_, &bi);
+      g.w = g.l.w;
+      g.h = g.l.h;
+      g.version = 0;
+      if (!g.tex || !g.tb) {
+        ReleaseLayer(g);
+        g.w = g.h = 0;
+        return;
       }
     }
-    if (!hud_ready_) return;
-    const Uint32 k = std::max<Uint32>(2, (sh + 240) / 480);
+    if (g.version != g.l.version) {
+      void* m = SDL_MapGPUTransferBuffer(dev_, g.tb, true);
+      if (!m) return;
+      std::memcpy(m, g.l.px.data(), size_t(g.w) * g.h * 4);
+      SDL_UnmapGPUTransferBuffer(dev_, g.tb);
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUTextureTransferInfo src{};
+      src.transfer_buffer = g.tb;
+      SDL_GPUTextureRegion dst{};
+      dst.texture = g.tex;
+      dst.w = Uint32(g.w);
+      dst.h = Uint32(g.h);
+      dst.d = 1;
+      SDL_UploadToGPUTexture(cp, &src, &dst, true);
+      SDL_EndGPUCopyPass(cp);
+      g.version = g.l.version;
+    }
     SDL_GPUBlitInfo b{};
-    b.source.texture = hud_tex_;
-    b.source.w = Hud::kW;
-    b.source.h = Hud::kH;
+    b.source.texture = g.tex;
+    b.source.w = Uint32(g.w);
+    b.source.h = Uint32(g.h);
     b.destination.texture = sc;
-    b.destination.x = k * 2;
-    b.destination.y = k * 2;
-    b.destination.w = Hud::kW * k;
-    b.destination.h = Hud::kH * k;
+    b.destination.x = x;
+    b.destination.y = y;
+    b.destination.w = Uint32(g.w) * k;
+    b.destination.h = Uint32(g.h) * k;
     b.load_op = SDL_GPU_LOADOP_LOAD;
     b.filter = SDL_GPU_FILTER_NEAREST;
     SDL_BlitGPUTexture(cmd, &b);
@@ -2295,7 +2326,9 @@ void r_color0(inout vec4 c) {
     return p;
   }
 
-  SDL_GPUSampler* Sampler(const SamplerKey& k) {
+  SDL_GPUSampler* Sampler(SamplerKey k) {
+    if (k.min == SDL_GPU_FILTER_LINEAR && k.mip == SDL_GPU_SAMPLERMIPMAPMODE_LINEAR)
+      k.aniso = uint8_t(std::max<int>(k.aniso, overlay::Anisotropy()));
     auto it = samplers_.find(k);
     if (it != samplers_.end()) return it->second;
     SDL_GPUSamplerCreateInfo si{};
@@ -2558,8 +2591,10 @@ void r_color0(inout vec4 c) {
     auto it = shader_pipelines_.find(k);
     if (it != shader_pipelines_.end()) return it->second;
     const uint8_t alpha[3] = {k.src_a, k.dst_a, k.op_a};
+    const uint64_t t0 = SDL_GetTicksNS();
     SDL_GPUGraphicsPipeline* p =
         CreatePipeline(k.k, shaders_.at(k.vs).sh, shaders_.at(k.ps).sh, alpha);
+    overlay::NoteShaderCompile(double(SDL_GetTicksNS() - t0) / 1e6);
     shader_pipelines_[k] = p;
     return p;
   }
@@ -2611,10 +2646,7 @@ void r_color0(inout vec4 c) {
   SDL_GPUTextureFormat depth24s8_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
   SDL_GPUTexture* backbuffer_ = nullptr;  // the game's back buffer
   SDL_GPUTexture* front_ = nullptr;       // the DirectDraw primary
-  Hud hud_;
-  SDL_GPUTexture* hud_tex_ = nullptr;
-  SDL_GPUTransferBuffer* hud_tb_ = nullptr;
-  bool hud_ready_ = false;
+  GpuLayer tele_, menu_;
   SDL_GPUTexture* dummy_ = nullptr;
   int bb_w_ = 0, bb_h_ = 0;
   // Mailbox emulated on vsync (ResetSwapChain, Show).

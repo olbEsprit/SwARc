@@ -10,7 +10,7 @@
 #include <cstring>
 #include <vector>
 
-#include "runtime/gfx/hud.h"
+#include "runtime/gfx/overlay.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/log.h"
 #include "runtime/runtime.h"
@@ -32,7 +32,7 @@ void PresentFrame(gfx::Device& dev, int w, int h) {
   }();
   static const bool hud_init = [] {
     const char* e = Env("HUD");
-    if (e && *e == '1') gfx::g_hud_on = true;
+    if (e && *e == '1') gfx::overlay::SetTelemetry(2);
     return true;
   }();
   (void)hud_init;

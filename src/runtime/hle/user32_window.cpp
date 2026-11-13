@@ -29,7 +29,7 @@
 #include "runtime/hle/input_state.h"
 #include "runtime/hle/kernel32_state.h"
 #include "runtime/hle/present.h"
-#include "runtime/gfx/hud.h"
+#include "runtime/gfx/overlay.h"
 #include "runtime/hle/user32_window.h"
 #include "runtime/hle/win32.h"
 #include "runtime/log.h"
@@ -459,6 +459,10 @@ void HandleSdlEvent(const SDL_Event& e) {
         ActivateApp(h, false);
       }
       break;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+      gfx::overlay::NotePadButton(e.gbutton.button, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+      break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
       uint32_t h = HwndForSdl(e.key.windowID);
@@ -468,8 +472,25 @@ void HandleSdlEvent(const SDL_Event& e) {
         break;
       }
       if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
-        gfx::g_hud_on = !gfx::g_hud_on;
+        gfx::overlay::SetTelemetry(gfx::overlay::TelemetryMode() + 1);
         break;
+      }
+      if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F4) {
+        gfx::overlay::Press(gfx::overlay::Input::Toggle);
+        break;
+      }
+      if (e.type == SDL_EVENT_KEY_DOWN && gfx::overlay::IsOpen()) {
+        using gfx::overlay::Input;
+        switch (e.key.scancode) {
+          case SDL_SCANCODE_UP: gfx::overlay::Press(Input::Up); break;
+          case SDL_SCANCODE_DOWN: gfx::overlay::Press(Input::Down); break;
+          case SDL_SCANCODE_LEFT: gfx::overlay::Press(Input::Left); break;
+          case SDL_SCANCODE_RIGHT: gfx::overlay::Press(Input::Right); break;
+          case SDL_SCANCODE_RETURN: case SDL_SCANCODE_SPACE: gfx::overlay::Press(Input::Accept); break;
+          case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_BACKSPACE: gfx::overlay::Press(Input::Back); break;
+          default: break;
+        }
+        break;  // the game does not see keys pressed while the menu is open
       }
       uint8_t vk = VkFromScancode(e.key.scancode);
       if (!h || !vk) break;
