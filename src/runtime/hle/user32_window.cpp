@@ -1104,13 +1104,15 @@ void PumpHostEvents() {
   InjectTestStall();
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
-    // Automated runs take input only from <ID>_TEST_INPUT: their windows
+    // Automated runs take input only from <ID>_TEST_INPUT (or keys pushed with
+    // the keyboard id kTestPointer, 0xD51D51): their windows
     // are on someone's desktop and stray clicks must not drive them.
     if (Background() && (e.type == SDL_EVENT_MOUSE_MOTION ||
                          e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                          e.type == SDL_EVENT_MOUSE_BUTTON_UP ||
                          e.type == SDL_EVENT_MOUSE_WHEEL ||
-                         e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP ||
+                         ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
+                          e.key.which != kTestPointer) ||
                          e.type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
                          e.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
                          e.type == SDL_EVENT_WINDOW_MOUSE_LEAVE))
