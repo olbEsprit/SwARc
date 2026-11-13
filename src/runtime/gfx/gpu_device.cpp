@@ -35,6 +35,7 @@
 
 #include "runtime/gfx/device.h"
 #include "runtime/gfx/overlay.h"
+#include "runtime/pacing.h"
 #include "runtime/gfx/shader_compile.h"
 #include "runtime/log.h"
 
@@ -1922,6 +1923,7 @@ void r_color0(inout vec4 c) {
   }
 
   void Present() override {
+    pacer_.Wait(overlay::FrameLimit());
     std::lock_guard<std::recursive_mutex> l(mu_);
     const uint64_t t0 = SDL_GetTicksNS();
     Flush();
@@ -3995,6 +3997,7 @@ void r_color0(inout vec4 c) {
   SDL_GPUTextureFormat depth24_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
   SDL_GPUTextureFormat depth24s8_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
   SDL_GPUTexture* backbuffer_ = nullptr;  // the game's back buffer
+  FramePacer pacer_;                      // the menu's frame limit
   SDL_GPUTexture* front_ = nullptr;       // the DirectDraw primary
   GpuLayer tele_, menu_;
   SDL_GPUTexture* dummy_ = nullptr;

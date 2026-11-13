@@ -61,7 +61,7 @@ target_compile_features(recomp_gfx PUBLIC cxx_std_20)
 # to SPIR-V, and SPIRV-Cross to MSL on macOS (gfx/shader_compile.cpp).
 find_package(glslang CONFIG REQUIRED)
 target_link_libraries(recomp_gfx PUBLIC SDL3::SDL3 recomp_hlsl
-  PRIVATE recomp_log glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
+  PRIVATE recomp_log recomp_base glslang::glslang glslang::SPIRV glslang::glslang-default-resource-limits)
 if(APPLE)
   # SPIRV-Cross's per-module configs do not find their dependencies.
   find_package(spirv_cross_core CONFIG REQUIRED)

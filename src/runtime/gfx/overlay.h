@@ -41,6 +41,9 @@ int Anisotropy();
 // The pads' sticks' dead zone, in percent of the throw.
 int StickDeadZone();
 
+// The frame rate Present holds the game to; 0: none.
+int FrameLimit();
+
 // 0 off, 1 FPS, 2 frame times, presentation and shader compiles.
 int TelemetryMode();
 void SetTelemetry(int mode);

@@ -76,6 +76,7 @@ uint64_t g_menu_version = 1;
 int g_tele = 0;
 std::atomic<int> g_aniso{0};
 std::atomic<int> g_deadzone{12};
+std::atomic<int> g_frame_limit{0};
 struct Stats {
   std::vector<double> dts;
   double present_ms = 0, compile_ms = 0, compile_ms_total = 0;
@@ -107,6 +108,12 @@ void EnsureBuiltins() {
                        g_deadzone = kPercent[v];
                      },
                      1});
+  g_items.push_back({"framelimit", "Frame limit", {"Off", "30", "60", "120"},
+                     [](int v) {
+                       static const int kFps[] = {0, 30, 60, 120};
+                       g_frame_limit = kFps[v];
+                     },
+                     0});
   g_items.push_back({"anisotropy", "Anisotropic filtering", {"Game", "2x", "4x", "8x", "16x"},
                      [](int v) { g_aniso = v ? 1 << v : 0; }, 0});
 }
@@ -235,6 +242,7 @@ bool CapturesPad() {
 
 int Anisotropy() { return g_aniso; }
 int StickDeadZone() { return g_deadzone; }
+int FrameLimit() { return g_frame_limit; }
 
 int TelemetryMode() {
   std::lock_guard<std::mutex> l(g_mu);
