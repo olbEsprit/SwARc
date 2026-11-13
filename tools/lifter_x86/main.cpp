@@ -421,6 +421,13 @@ int main(int argc, char** argv) {
       return 1;
     }
 
+  for (const auto& [va, name] : p.hooks)
+    if (!stats.hooks.count(va)) {
+      std::fprintf(stderr, "hook %s at %08llX: no lifted instruction there\n", name.c_str(),
+                   (unsigned long long)va);
+      return 1;
+    }
+
   std::string report;
   report += "functions " + std::to_string(p.entries.size()) + "\n";
   report += "instructions " + std::to_string(stats.insns) + "\n";

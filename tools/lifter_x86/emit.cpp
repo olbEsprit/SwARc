@@ -3639,6 +3639,8 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
     o += "void " + FnName(f.entry) + "(::recomp::Ctx& c) { " + host->second.symbol + "(c, " +
          Hex(host->second.module_base) + "); }\n";
   }
+  for (auto h = p_.hooks.lower_bound(f.entry); h != p_.hooks.end(); ++h)
+    if (f.insns.count(h->first)) o += "void " + h->second + "(::recomp::Ctx& c);\n";
   o += "void " + FnName(f.entry) + (p_.replaced.count(f.entry) ? "_lifted" : "") +
        "(::recomp::Ctx& c) {\n  LIFT_ENTER\n";
   // Functions that register an SEH frame (32-bit: write fs:[0]) can be
@@ -3696,6 +3698,15 @@ void Emitter::EmitFunction(const Function& f, std::string* out,
                                       "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
       o += e.frame_reg ? Fmt("  EF = %s - 0x%Xu;\n", kRegs[e.frame_reg], 16u * e.frame_off)
                        : std::string("  EF = rsp;\n");
+    }
+    auto hook = p_.hooks.find(in.va);
+    if (hook != p_.hooks.end()) {
+      for (const auto& [from, to] : runs)
+        if (in.va > from && in.va <= to)
+          std::fprintf(stderr, "hook %s at %08llX: inside an x87 run (%08llX-%08llX)\n",
+                       hook->second.c_str(), U(in.va), U(from), U(to)), std::exit(1);
+      o += Fmt("  LIFT_SPILL; %s(c); LIFT_RELOAD;\n", hook->second.c_str());
+      stats->hooks.insert(in.va);
     }
     auto run = runs.find(in.va);
     if (run != runs.end()) {

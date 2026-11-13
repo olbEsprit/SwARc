@@ -160,6 +160,12 @@ bool Program::LoadManifest(const std::string& path, std::string* err) {
       entries.insert(va);
       replaced.insert(va);
       if (!name.empty()) names[va] = name;
+    } else if (kind == "hook") {
+      if (name.empty()) {
+        *err = path + ":" + std::to_string(no) + ": hook needs a function name";
+        return false;
+      }
+      hooks[va] = name;
     } else if (kind == "native") {
       if (name.empty()) {
         *err = path + ":" + std::to_string(no) + ": native needs a function name";

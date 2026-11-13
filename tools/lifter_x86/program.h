@@ -86,6 +86,10 @@ struct Program {
   std::map<uint64_t, std::vector<uint64_t>> jumptables;  // jmp va -> targets
   std::set<uint64_t> noreturn_iat;            // import slots of ExitProcess etc.
   std::map<uint64_t, std::string> probes;     // manifest: probe on entry
+  // manifest `hook`: the game project's void NAME(Ctx&) runs before the
+  // instruction at the VA, with the registers and flags in Ctx (changes
+  // to them are taken back); not inside an x87 run.
+  std::map<uint64_t, std::string> hooks;
   std::set<uint64_t> replaced;                // manifest: the game project
                                               // defines f_X; the lifted body
                                               // is emitted as f_X_lifted

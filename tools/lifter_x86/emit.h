@@ -15,6 +15,7 @@ namespace lifter {
 struct EmitStats {
   uint64_t insns = 0;
   std::map<std::string, uint64_t> unimplemented;  // mnemonic -> count
+  std::set<uint64_t> hooks;                        // manifest hooks emitted
 };
 
 std::string FnName(uint64_t va);
