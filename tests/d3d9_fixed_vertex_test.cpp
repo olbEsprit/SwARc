@@ -139,6 +139,64 @@ void DrawPretransformed(gfx::Device& dev, gfx::ShaderId ps_id, const hlsl::Progr
   dev.DestroyShader(vs_id);
 }
 
+// A lit quad covering clip space: normals toward the viewer (-z), one directional light shining along +z, so N.L
+// is 1; COLOR0 read by `ps_lit`. With `vertex_diffuse` COLORVERTEX takes the diffuse from the vertex's colour.
+void DrawLit(gfx::Device& dev, gfx::ShaderId ps_id, const hlsl::Program& ps, bool vertex_diffuse) {
+  struct V { float x, y, z, nx, ny, nz; uint32_t c; };
+  std::vector<guest::D3DVERTEXELEMENT9> decl = {
+      {0, 0, 2, 0, 0, 0},    // FLOAT3 POSITION
+      {0, 12, 2, 0, 3, 0},   // FLOAT3 NORMAL
+      {0, 24, 4, 0, 10, 0},  // D3DCOLOR COLOR0
+      {0xFF, 0, 17, 0, 0, 0},
+  };
+  uint32_t tss[8][33] = {};
+  uint32_t rs[256] = {};
+  rs[137] = 1;            // LIGHTING
+  rs[139] = 0x00202020;   // AMBIENT
+  rs[141] = vertex_diffuse ? 1 : 0;  // COLORVERTEX
+  rs[145] = 1;            // DIFFUSEMATERIALSOURCE: COLOR1
+  d3d9::FixedVertexState state{&decl, &ps.varyings, tss, true, rs, {3}};
+  std::string src = d3d9::FixedVertexSource(state);
+  hlsl::Program vs;
+  std::string errors;
+  if (!hlsl::Compile(src, {}, "main", "vs_3_0", 0, &vs, &errors)) {
+    std::fprintf(stderr, "generated lit vertex shader does not compile:\n%s\n%s", errors.c_str(), src.c_str());
+    std::exit(1);
+  }
+  gfx::ShaderId vs_id = dev.CreateShader(vs);
+  std::map<uint32_t, std::array<float, 16>> transforms;
+  float constants[256][4] = {};
+  d3d9::WorldViewProjection(transforms, &constants[0][0]);
+  guest::D3DMATERIAL9 mat{};
+  mat.Diffuse = {1.0f, 0.5f, 0.0f, 1.0f};
+  mat.Ambient = {1.0f, 1.0f, 1.0f, 1.0f};
+  guest::D3DLIGHT9 light{};
+  light.Type = 3;
+  light.Diffuse = {1.0f, 1.0f, 1.0f, 1.0f};
+  light.Direction = {0.0f, 0.0f, 1.0f};
+  d3d9::FixedLightingConstants(transforms, rs, mat, {&light}, constants);
+  const V quad[4] = {{-1, 1, 0.5f, 0, 0, -1, 0xFF0000FF}, {1, 1, 0.5f, 0, 0, -1, 0xFF0000FF},
+                     {-1, -1, 0.5f, 0, 0, -1, 0xFF0000FF}, {1, -1, 0.5f, 0, 0, -1, 0xFF0000FF}};
+  std::vector<gfx::VertexInput> inputs = d3d9::VertexInputs(vs.inputs, decl);
+  gfx::ShaderDraw sd;
+  sd.vs = vs_id;
+  sd.ps = ps_id;
+  sd.prim = 5;
+  sd.primitives = 2;
+  sd.vertex_count = 4;
+  sd.inputs = inputs.data();
+  sd.input_count = uint32_t(inputs.size());
+  sd.streams[0] = {reinterpret_cast<const uint8_t*>(quad), sizeof quad, sizeof(V)};
+  sd.vs_float = constants;
+  static const float zero[224][4] = {};
+  sd.ps_float = zero;
+  dev.Clear(0, nullptr, 1, 0xFF000000, 1.0f, 0);
+  dev.BeginScene();
+  dev.DrawShader(sd);
+  dev.EndScene();
+  dev.DestroyShader(vs_id);
+}
+
 }  // namespace
 
 int main() {
@@ -193,6 +251,24 @@ int main() {
   c = Pixel(*dev, 48, 48);
   Check(std::abs(int(c >> 16 & 0xFF) - 128) <= 8 && std::abs(int(c & 0xFF) - 128) <= 2,
         "pretransformed: inside the quad", 48, 48, c);
+
+  // Lighting: the material's diffuse by the light plus its ambient by AMBIENT (0x20 = 32).
+  hlsl::Program ps_lit;
+  if (!hlsl::Compile("float4 main(float4 c : COLOR0) : COLOR0 { return c; }\n", {}, "main", "ps_3_0", 0, &ps_lit,
+                     &errors)) {
+    std::fprintf(stderr, "%s\n", errors.c_str());
+    return 1;
+  }
+  gfx::ShaderId ps_lit_id = dev->CreateShader(ps_lit);
+  DrawLit(*dev, ps_lit_id, ps_lit, false);
+  c = Pixel(*dev, 32, 32);
+  Check(int(c >> 16 & 0xFF) >= 253 && std::abs(int(c >> 8 & 0xFF) - 160) <= 3 && std::abs(int(c & 0xFF) - 32) <= 3,
+        "lit: material diffuse x light + ambient", 32, 32, c);
+  DrawLit(*dev, ps_lit_id, ps_lit, true);
+  c = Pixel(*dev, 32, 32);
+  Check(std::abs(int(c >> 16 & 0xFF) - 32) <= 3 && std::abs(int(c >> 8 & 0xFF) - 32) <= 3 && int(c & 0xFF) >= 253,
+        "lit: COLORVERTEX takes the vertex's diffuse", 32, 32, c);
+  dev->DestroyShader(ps_lit_id);
 
   dev.reset();
   SDL_DestroyWindow(win);

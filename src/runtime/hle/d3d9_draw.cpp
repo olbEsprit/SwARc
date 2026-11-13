@@ -407,11 +407,20 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   } else {
     FatalF("d3d9: %s without a vertex declaration or FVF", what);
   }
-  float ff_constants[4][4];
+  float ff_constants[256][4] = {};
   const float(*vs_float)[4] = d.vs_f;
   if (!vs) {
-    FixedVertexState fv{elements, &ps->program->varyings, d.tss, d.rs[137] != 0};
+    FixedVertexState fv{elements, &ps->program->varyings, d.tss, d.rs[137] != 0, d.rs, {}};
+    std::vector<const guest::D3DLIGHT9*> lights;
+    if (fv.lighting)
+      for (const auto& [i, on] : d.light_on) {
+        auto it = d.lights.find(i);
+        if (!on || it == d.lights.end() || lights.size() == 8) continue;
+        lights.push_back(&it->second);
+        fv.light_types.push_back(it->second.Type);
+      }
     vs = Generated(d, d.ff_vertex, FixedVertexSource(fv), false);
+    if (fv.lighting && !Pretransformed(d)) FixedLightingConstants(d.transforms, d.rs, d.material, lights, ff_constants);
     if (Pretransformed(d)) {
       const guest::D3DVIEWPORT9& v = d.viewport;
       ff_constants[0][0] = float(v.X);
