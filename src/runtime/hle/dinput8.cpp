@@ -166,6 +166,7 @@ struct InputDevice : com::Object {
   struct PadAction {
     uint32_t app, semantic, obj;
     int32_t last = 0;
+    bool dpad_axes = true;  // the D-pad also moves DIAXIS_ANY_X_1/_Y_1, unless the map gives it actions of its own
   };
   std::vector<PadAction> pad_actions;
   int32_t axis_lo = 0, axis_hi = 0;
@@ -316,12 +317,15 @@ bool PadFromGuid(uint32_t va, XInputPad* out) {
 
 // The SDL buttons of c_dfDIJoystick2's buttons; L2 and R2 (-1) are the
 // triggers past half way.
-constexpr int kPadButtons[kJoyButtons] = {
+// Buttons 14..17, the D-pad, are objects of action maps only: the raw state and the caps keep the D-pad as POV 0.
+constexpr uint32_t kActionButtons = kJoyButtons + 4;
+constexpr int kPadButtons[kActionButtons] = {
     SDL_GAMEPAD_BUTTON_WEST,          SDL_GAMEPAD_BUTTON_SOUTH,      SDL_GAMEPAD_BUTTON_EAST,
     SDL_GAMEPAD_BUTTON_NORTH,         SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
     -1,                               -1,                            SDL_GAMEPAD_BUTTON_BACK,
     SDL_GAMEPAD_BUTTON_START,         SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK,
-    SDL_GAMEPAD_BUTTON_GUIDE,         SDL_GAMEPAD_BUTTON_TOUCHPAD};
+    SDL_GAMEPAD_BUTTON_GUIDE,         SDL_GAMEPAD_BUTTON_TOUCHPAD,   SDL_GAMEPAD_BUTTON_DPAD_UP,
+    SDL_GAMEPAD_BUTTON_DPAD_DOWN,     SDL_GAMEPAD_BUTTON_DPAD_LEFT,  SDL_GAMEPAD_BUTTON_DPAD_RIGHT};
 
 bool PadButtonDown(const PadState& s, uint32_t b) {
   if (b == 6) return s.axis[SDL_GAMEPAD_AXIS_LEFT_TRIGGER] > 16384;
@@ -380,7 +384,7 @@ uint32_t PadObjectFor(uint32_t semantic, bool steers) {
   for (const GameConfig::PadButton& p : Game().pad_buttons) {
     if (p.semantic != semantic) continue;
     if (p.button < 0) return 0;
-    for (uint32_t b = 0; b < kJoyButtons; b++)
+    for (uint32_t b = 0; b < kActionButtons; b++)
       if (kPadButtons[b] == p.button) return ButtonObj(b);
     FatalF("dinput8: pad_buttons names SDL button %d, which is not a pad button", p.button);
   }
@@ -420,10 +424,10 @@ int32_t PadActionValue(const PadState& s, const InputDevice::PadAction& a, int32
     const int64_t m = std::min<int64_t>(std::abs(v), 32767);
     v = m <= kDeadZone ? 0 : (v < 0 ? -1 : 1) * (m - kDeadZone) * 32767 / (32767 - kDeadZone);
   }
-  if (a.semantic == kSemAnyX1) {
+  if (a.semantic == kSemAnyX1 && a.dpad_axes) {
     if (s.button[SDL_GAMEPAD_BUTTON_DPAD_LEFT]) v = -32768;
     if (s.button[SDL_GAMEPAD_BUTTON_DPAD_RIGHT]) v = 32767;
-  } else if (a.semantic == kSemAnyY1) {
+  } else if (a.semantic == kSemAnyY1 && a.dpad_axes) {
     if (s.button[SDL_GAMEPAD_BUTTON_DPAD_UP]) v = -32768;
     if (s.button[SDL_GAMEPAD_BUTTON_DPAD_DOWN]) v = 32767;
   }
@@ -793,13 +797,23 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::BuildActionMap", DID8_BuildActio
   auto* actions = reinterpret_cast<DIACTIONA*>(GPtr(f->rgoAction));
   bool steers = false;
   for (uint32_t i = 0; i < f->dwNumActions; i++) steers |= actions[i].dwSemantic == kSemSteer;
+  // RECOMP_DINPUT_ACTIONS=1 lists the map's actions, to give a game's pad the ones it declares only for keys.
+  if (std::getenv("RECOMP_DINPUT_ACTIONS")) {
+    WarnF("dinput8: action map genre %08X, %u actions, on the %s\n", f->dwGenre, f->dwNumActions,
+          d->keyboard ? "keyboard" : d->pad ? "pad" : "mouse");
+    for (uint32_t i = 0; i < f->dwNumActions; i++)
+      WarnF("dinput8:   app %08X semantic %08X flags %X \"%s\"\n", actions[i].uAppData, actions[i].dwSemantic,
+            actions[i].dwFlags, actions[i].lptszActionName ? reinterpret_cast<const char*>(GPtr(actions[i].lptszActionName)) : "");
+  }
   for (uint32_t i = 0; i < f->dwNumActions; i++) {
     DIACTIONA* a = &actions[i];
     if (d->keyboard && (a->dwSemantic & 0xFF000000) == 0x81000000) {
       a->guidInstance = kGUID_SysKeyboard;
       a->dwObjID = (a->dwSemantic & 0xFF) << 8 | DIDFT_BUTTON;
       a->dwHow = DIAH_DEFAULT;
-    } else if (uint32_t obj = d->pad ? PadObjectFor(a->dwSemantic, steers) : 0) {
+    } else if (uint32_t obj = d->pad && (steers || (a->dwSemantic & 0xFF000000) != 0x81000000)
+                                  ? PadObjectFor(a->dwSemantic, steers)
+                                  : 0) {
       a->guidInstance = PadInstanceGuid(d->pad_info);
       a->dwObjID = obj;
       a->dwHow = DIAH_DEFAULT;
@@ -825,12 +839,16 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::SetActionMap", DID8_SetActionMap
       d->actions[uint8_t(a->dwObjID >> 8)] = a->uAppData;
     if (d->pad && std::memcmp(&a->guidInstance, &pad, 16) == 0) {
       uint32_t n = a->dwObjID >> 8 & 0xFFFF;
-      bool axis = (a->dwObjID & DIDFT_ABSAXIS) && n < kJoyAxes, button = (a->dwObjID & DIDFT_PSHBUTTON) && n < kJoyButtons;
+      bool axis = (a->dwObjID & DIDFT_ABSAXIS) && n < kJoyAxes, button = (a->dwObjID & DIDFT_PSHBUTTON) && n < kActionButtons;
       if (!axis && !button) FatalF("dinput8: SetActionMap maps a pad action to object 0x%x", a->dwObjID);
       d->pad_actions.push_back({a->uAppData, a->dwSemantic, a->dwObjID});
     }
   }
   if (d->pad) {
+    bool dpad = false;
+    for (const auto& a : d->pad_actions)
+      dpad |= (a.obj & DIDFT_PSHBUTTON) && (a.obj >> 8 & 0xFFFF) >= kJoyButtons;
+    for (auto& a : d->pad_actions) a.dpad_axes = !dpad;
     // A format without an axis range leaves DirectInput's default.
     d->axis_lo = f->lAxisMin == f->lAxisMax ? 0 : f->lAxisMin;
     d->axis_hi = f->lAxisMin == f->lAxisMax ? 65535 : f->lAxisMax;

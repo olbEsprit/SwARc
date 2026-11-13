@@ -349,6 +349,27 @@ int main() {
   Push(joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, -32768);
   Push(joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, -32768);
 
+  // A game's keys-only driving action on the D-pad by pad_buttons: in a map that steers it maps (to button 14, the
+  // D-pad's up), the D-pad then leaves the steering alone; in a menu map the key stays off the pad.
+  Call("IDirectInputDevice8A::Unacquire", {mdev});
+  proc.game.pad_buttons = {{0x81000411, SDL_GAMEPAD_BUTTON_DPAD_UP}};
+  WriteFormat(0x01000000, {0x01008A01, 0x81000411});
+  Call("IDirectInputDevice8A::BuildActionMap", {mdev, kActionFormat, 0, 0});
+  Check(ActionObj(1) == 0xE04 && ActionHow(1) == 0x20, "a key's semantic on the D-pad's up in a map that steers");
+  Call("IDirectInputDevice8A::SetActionMap", {mdev, kActionFormat, 0, 0});
+  Call("IDirectInputDevice8A::Acquire", {mdev});
+  Events(mdev);
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_UP, true);
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_LEFT, true);
+  ev = Events(mdev);
+  Check(ev.size() == 1 && ev[0].first == 1 && ev[0].second == 0x80, "D-pad up: the key's action; left: no steering");
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_UP, false);
+  Press(joy, SDL_GAMEPAD_BUTTON_DPAD_LEFT, false);
+  Call("IDirectInputDevice8A::Unacquire", {mdev});
+  WriteFormat(0x01000000, {0xFF00C201, 0x81000411});
+  Call("IDirectInputDevice8A::BuildActionMap", {mdev, kActionFormat, 0, 0});
+  Check(ActionHow(1) == 0, "a key's semantic stays off the pad in a menu map");
+
   SDL_DetachVirtualJoystick(id);
   SDL_UpdateJoysticks();
   Check(Call("IDirectInputDevice8A::GetDeviceState", {dev, 272, kState}) == DIERR_UNPLUGGED, "unplugged state");

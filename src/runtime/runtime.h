@@ -76,7 +76,8 @@ struct GameConfig {
   // DirectInput action maps on pads: DIBUTTON_ANY(n) is the pad's button n
   // in its c_dfDIJoystick2 order. A game whose menus expect other buttons
   // for its semantics names them here (an SDL_GamepadButton each, -1 for
-  // none).
+  // none). A DIKEYBOARD_* semantic named here is put on the pad too, in maps
+  // that steer (DIAXIS_DRIVINGR_STEER): a game's keys-only driving actions.
   struct PadButton {
     uint32_t semantic;
     int button;
