@@ -14,6 +14,13 @@
 // everything in one copy pass and replays the list in one render pass.
 // Texture uploads queue the same way and land before the next pass.
 //
+// Flushes are encoded on a thread of their own (GFX_THREAD=0: on the
+// caller's): a flush hands its recorded lists to it as a Batch, in order
+// with the other jobs posted to it (Post). Work that needs the GPU state
+// or the command buffer at once runs there too, the caller waiting
+// (OnEncoder); command buffers stay on the thread that acquired them, so
+// Present acquires the swap chain on its own.
+//
 // Colour textures and render targets are all B8G8R8A8 (D3D's A8R8G8B8
 // memory layout): other D3D formats are converted on upload and on
 // readback, as the d3d9 backend does for its X8R8G8B8 back buffer. DXT
@@ -24,15 +31,20 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
 
+#include "runtime/env.h"
 #include "runtime/gfx/device.h"
 #include "runtime/gfx/overlay.h"
 #include "runtime/pacing.h"
@@ -469,13 +481,26 @@ class GpuDevice final : public Device {
       for (int l = 0; l < layers; l++) QueueUpload(*t, 0, 0, 0, 1, 1, &black, 4, 1, 4, false, false, l);
     }
 
-    std::fprintf(stderr, "gfx: SDL_GPU (%s)\n", SDL_GetGPUDeviceDriver(dev_));
+    const char* threaded = Env("GFX_THREAD");
+    if (!threaded || std::strcmp(threaded, "0") != 0) encoder_ = std::thread([this] { EncoderLoop(); });
+    std::fprintf(stderr, "gfx: SDL_GPU (%s)%s\n", SDL_GetGPUDeviceDriver(dev_),
+                 Threaded() ? "" : ", encoding inline");
     return true;
   }
 
   ~GpuDevice() override {
     if (!dev_) return;
-    if (open_) SDL_SubmitGPUCommandBuffer(open_);
+    OnEncoder([&] {
+      if (open_) SDL_SubmitGPUCommandBuffer(open_);
+    });
+    if (Threaded()) {
+      {
+        std::lock_guard<std::mutex> l(q_mu_);
+        stop_ = true;
+      }
+      q_cv_.notify_one();
+      encoder_.join();
+    }
     SDL_WaitForGPUIdle(dev_);
     for (const InFlight& f : in_flight_) SDL_ReleaseGPUFence(dev_, f.fence);
     for (const Landing& w : landings_) SDL_ReleaseGPUTransferBuffer(dev_, w.tb);
@@ -512,6 +537,7 @@ class GpuDevice final : public Device {
   void ResetSwapChain(int w, int h, bool vsync) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     Flush();
+    Drain();  // queued flushes draw into the old buffers
     pass_color_ = pass_depth_ = nullptr;
     pass_colors_.fill(nullptr);
     for (SDL_GPUTexture** t : {&backbuffer_, &front_}) {
@@ -596,7 +622,7 @@ class GpuDevice final : public Device {
     for (ColorTarget& e : current_extra_)
       if (e.tex == id) e = {}, bound = true;
     if (bound) BindTarget();
-    SDL_ReleaseGPUTexture(dev_, it->second.tex);
+    Release(it->second.tex);
     textures_.erase(it);
     tex_gen_++;
     fs_dirty_ = true;
@@ -717,15 +743,18 @@ class GpuDevice final : public Device {
     if (at + size > it->second.size) FatalF("gfx: an upload past buffer %u's end", id);
     if (std::find(draw_read_.begin(), draw_read_.end(), id) != draw_read_.end())
       Flush();  // draws recorded with it
-    std::memcpy(MapUpload(size), src, size);
-    SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
-    SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTransferBufferLocation from{upload_tb_, upload_at_};
-    SDL_GPUBufferRegion to{heap_, it->second.at + at, size};
-    SDL_UploadToGPUBuffer(cp, &from, &to, false);
-    SDL_EndGPUCopyPass(cp);
-    Submit(cmd);
+    const uint32_t dst = it->second.at + at;
+    OnEncoder([&] {
+      std::memcpy(MapUpload(size), src, size);
+      SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
+      SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUTransferBufferLocation from{upload_tb_, upload_at_};
+      SDL_GPUBufferRegion to{heap_, dst, size};
+      SDL_UploadToGPUBuffer(cp, &from, &to, false);
+      SDL_EndGPUCopyPass(cp);
+      Submit(cmd);
+    });
   }
 
   // A 2D depth target (layers 0) or a 2D array of `layers`.
@@ -778,7 +807,7 @@ class GpuDevice final : public Device {
       current_depth_ = 0;
       BindTarget();
     }
-    SDL_ReleaseGPUTexture(dev_, it->second.tex);
+    Release(it->second.tex);
     depths_.erase(it);
   }
 
@@ -826,7 +855,6 @@ class GpuDevice final : public Device {
     if (a.right <= a.left || a.bottom <= a.top || b.right <= b.left || b.bottom <= b.top) return;
     // Draws recorded so far come first (into either texture).
     Flush();
-    SDL_GPUCommandBuffer* cmd = Begin();
     SDL_GPUBlitInfo bi{};
     bi.source.texture = s;
     bi.source.mip_level = Uint32(src.tex ? src.level : 0);
@@ -844,8 +872,11 @@ class GpuDevice final : public Device {
     bi.destination.h = Uint32(b.bottom - b.top);
     bi.load_op = SDL_GPU_LOADOP_LOAD;
     bi.filter = linear ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
-    SDL_BlitGPUTexture(cmd, &bi);
-    Submit(cmd);
+    Post([this, bi] {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_BlitGPUTexture(cmd, &bi);
+      Submit(cmd);
+    });
   }
 
   // ---- 2D
@@ -898,6 +929,9 @@ class GpuDevice final : public Device {
   void PresentFront() override {
     std::lock_guard<std::recursive_mutex> l(mu_);
     Flush();
+    OnEncoder([&] {
+      if (Threaded()) SubmitOpen();  // Show acquires its own command buffer
+    });
     SDL_GPUCommandBuffer* cmd = Begin();
     Show(cmd);
     SubmitOpen();
@@ -1225,6 +1259,7 @@ void r_color0(inout vec4 c) {
     if (it == shaders_.end()) return;
     // Recorded draws and cached pipelines may use it.
     Flush();
+    Drain();
     for (auto p = shader_pipelines_.begin(); p != shader_pipelines_.end();) {
       if (p->first.vs == id || p->first.ps == id) {
         SDL_ReleaseGPUGraphicsPipeline(dev_, p->second);
@@ -1387,7 +1422,7 @@ void r_color0(inout vec4 c) {
 #endif
       sc.smp[r] = Sampler(sk);
     }
-    ShaderPipeline(sc.key);
+    sc.pipeline = ShaderPipeline(sc.key);
     c.shader = int(shader_cmds_.size());
     shader_cmds_.push_back(sc);
     cmds_.push_back(c);
@@ -1456,6 +1491,7 @@ void r_color0(inout vec4 c) {
     auto it = programs_.find(id);
     if (it == programs_.end()) return;
     Flush();
+    Drain();
     for (auto p = program_pipelines_.begin(); p != program_pipelines_.end();) {
       if (p->first.program == id) {
         SDL_ReleaseGPUGraphicsPipeline(dev_, p->second);
@@ -1535,35 +1571,37 @@ void r_color0(inout vec4 c) {
     if (!w || !h || IsCompressed(t.fmt)) return;
     Flush();
     const uint32_t row = RowPitch(t.fmt, w), size = row * h;
-    SDL_GPUTransferBufferCreateInfo tbi{};
-    tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-    tbi.size = size;
-    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(dev_, &tbi);
-    if (!tb) FatalF("gfx: transfer buffer: %s", SDL_GetError());
-    SDL_GPUCommandBuffer* cmd = Begin();
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTextureRegion src{};
-    src.texture = t.tex;
-    src.mip_level = Uint32(level);
-    src.layer = Uint32(layer);
-    src.x = Uint32(c.left);
-    src.y = Uint32(c.top);
-    src.w = w;
-    src.h = h;
-    src.d = 1;
-    SDL_GPUTextureTransferInfo to{};
-    to.transfer_buffer = tb;
-    to.pixels_per_row = w;
-    to.rows_per_layer = h;
-    SDL_DownloadFromGPUTexture(cp, &src, &to);
-    SDL_EndGPUCopyPass(cp);
-    SubmitOpen();
-    Drain();
-    const auto* p = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(dev_, tb, false));
-    for (uint32_t y = 0; y < h; y++)
-      std::memcpy(static_cast<uint8_t*>(dst) + size_t(y) * pitch, p + size_t(y) * row, row);
-    SDL_UnmapGPUTransferBuffer(dev_, tb);
-    SDL_ReleaseGPUTransferBuffer(dev_, tb);
+    OnEncoder([&] {
+      SDL_GPUTransferBufferCreateInfo tbi{};
+      tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+      tbi.size = size;
+      SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(dev_, &tbi);
+      if (!tb) FatalF("gfx: transfer buffer: %s", SDL_GetError());
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUTextureRegion src{};
+      src.texture = t.tex;
+      src.mip_level = Uint32(level);
+      src.layer = Uint32(layer);
+      src.x = Uint32(c.left);
+      src.y = Uint32(c.top);
+      src.w = w;
+      src.h = h;
+      src.d = 1;
+      SDL_GPUTextureTransferInfo to{};
+      to.transfer_buffer = tb;
+      to.pixels_per_row = w;
+      to.rows_per_layer = h;
+      SDL_DownloadFromGPUTexture(cp, &src, &to);
+      SDL_EndGPUCopyPass(cp);
+      SubmitOpen();
+      GpuIdle();
+      const auto* p = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(dev_, tb, false));
+      for (uint32_t y = 0; y < h; y++)
+        std::memcpy(static_cast<uint8_t*>(dst) + size_t(y) * pitch, p + size_t(y) * row, row);
+      SDL_UnmapGPUTransferBuffer(dev_, tb);
+      SDL_ReleaseGPUTransferBuffer(dev_, tb);
+    });
   }
 
   void ClearImage(TextureId id, int level, const Color& c) override {
@@ -1571,18 +1609,20 @@ void r_color0(inout vec4 c) {
     auto it = textures_.find(id);
     if (it == textures_.end() || !it->second.rt || level < 0 || level >= it->second.levels) return;
     Flush();
-    SDL_GPUCommandBuffer* cmd = Begin();
-    for (int layer = 0; layer < it->second.layers; layer++) {
-      SDL_GPUColorTargetInfo ct{};
-      ct.texture = it->second.tex;
-      ct.mip_level = Uint32(level);
-      ct.layer_or_depth_plane = Uint32(layer);
-      ct.load_op = SDL_GPU_LOADOP_CLEAR;
-      ct.clear_color = {c.r, c.g, c.b, c.a};
-      ct.store_op = SDL_GPU_STOREOP_STORE;
-      SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr));
-    }
-    Submit(cmd);
+    Post([this, tex = it->second.tex, layers = it->second.layers, level, c] {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      for (int layer = 0; layer < layers; layer++) {
+        SDL_GPUColorTargetInfo ct{};
+        ct.texture = tex;
+        ct.mip_level = Uint32(level);
+        ct.layer_or_depth_plane = Uint32(layer);
+        ct.load_op = SDL_GPU_LOADOP_CLEAR;
+        ct.clear_color = {c.r, c.g, c.b, c.a};
+        ct.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr));
+      }
+      Submit(cmd);
+    });
   }
 
   void ClearDepth(DepthId id, float z, int stencil, int layer) override {
@@ -1590,7 +1630,6 @@ void r_color0(inout vec4 c) {
     auto it = depths_.find(id);
     if (it == depths_.end() || layer < 0 || layer >= it->second.layers) return;
     Flush();
-    SDL_GPUCommandBuffer* cmd = Begin();
     SDL_GPUDepthStencilTargetInfo dt{};
     dt.texture = it->second.tex;
     dt.load_op = SDL_GPU_LOADOP_CLEAR;
@@ -1600,8 +1639,11 @@ void r_color0(inout vec4 c) {
     dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
     dt.clear_stencil = Uint8(stencil >= 0 ? stencil : 0);
     dt.layer = Uint8(layer);
-    SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, nullptr, 0, &dt));
-    Submit(cmd);
+    Post([this, dt] {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_EndGPURenderPass(SDL_BeginGPURenderPass(cmd, nullptr, 0, &dt));
+      Submit(cmd);
+    });
   }
 
   void CopyDepth(DepthId src, DepthId dst, const Rect& r) override {
@@ -1611,20 +1653,22 @@ void r_color0(inout vec4 c) {
     const Rect a = Clip(Clip(r, s->second.w, s->second.h), d->second.w, d->second.h);
     if (a.right <= a.left || a.bottom <= a.top) return;
     Flush();
-    SDL_GPUCommandBuffer* cmd = Begin();
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
     SDL_GPUTextureLocation from{}, to{};
     from.texture = s->second.tex;
     from.x = to.x = Uint32(a.left);
     from.y = to.y = Uint32(a.top);
     to.texture = d->second.tex;
-    for (int i = 0; i < std::min(s->second.layers, d->second.layers); i++) {
-      from.layer = to.layer = Uint32(i);
-      SDL_CopyGPUTextureToTexture(cp, &from, &to, Uint32(a.right - a.left), Uint32(a.bottom - a.top), 1,
-                                  false);
-    }
-    SDL_EndGPUCopyPass(cp);
-    Submit(cmd);
+    Post([this, from, to, a, layers = std::min(s->second.layers, d->second.layers)]() mutable {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      for (int i = 0; i < layers; i++) {
+        from.layer = to.layer = Uint32(i);
+        SDL_CopyGPUTextureToTexture(cp, &from, &to, Uint32(a.right - a.left), Uint32(a.bottom - a.top), 1,
+                                    false);
+      }
+      SDL_EndGPUCopyPass(cp);
+      Submit(cmd);
+    });
   }
 
   void DrawProgram(const ProgramDraw& d) override {
@@ -1726,135 +1770,136 @@ void r_color0(inout vec4 c) {
     if (!d.groups[0] || !d.groups[1] || !d.groups[2]) return;
     // What was drawn before comes first.
     Flush();
-
-    // The read-only and read-write buffers, each in its own arena, and
-    // their places in the uniform block. Read-only GPU buffers are read
-    // in the heap; read-write ones are copied into their arena, and their
-    // results back out, on the GPU.
-    Arena ro, rw;
-    std::vector<uint32_t> table(4 * size_t(st.buffers + st.rw_buffers), 0);
-    std::vector<BufferCopy> rw_in, rw_out;
-    bool host_rw = false;
-    for (uint32_t b = 0; b < st.buffers; b++) {
-      const BufferData& bd = d.cs.buffers[b];
-      if (bd.buffer) {
-        HeapEntry(bd, &table[4 * b]);
-        continue;
+    OnEncoder([&] {
+      // The read-only and read-write buffers, each in its own arena, and
+      // their places in the uniform block. Read-only GPU buffers are read
+      // in the heap; read-write ones are copied into their arena, and their
+      // results back out, on the GPU.
+      Arena ro, rw;
+      std::vector<uint32_t> table(4 * size_t(st.buffers + st.rw_buffers), 0);
+      std::vector<BufferCopy> rw_in, rw_out;
+      bool host_rw = false;
+      for (uint32_t b = 0; b < st.buffers; b++) {
+        const BufferData& bd = d.cs.buffers[b];
+        if (bd.buffer) {
+          HeapEntry(bd, &table[4 * b]);
+          continue;
+        }
+        table[4 * b] = uint32_t(ro.size() / 4);
+        table[4 * b + 1] = bd.size;
+        AppendWords(ro, bd.data, bd.size);
       }
-      table[4 * b] = uint32_t(ro.size() / 4);
-      table[4 * b + 1] = bd.size;
-      AppendWords(ro, bd.data, bd.size);
-    }
-    std::vector<uint32_t> rw_at(st.rw_buffers);
-    for (uint32_t b = 0; b < st.rw_buffers; b++) {
-      const RwBufferData& bd = d.rw_buffers[b];
-      rw_at[b] = uint32_t(rw.size());
-      table[4 * (st.buffers + b)] = uint32_t(rw.size() / 4);
-      table[4 * (st.buffers + b) + 1] = bd.size;
-      if (bd.buffer) {
-        BufferCopy c = GpuBufferCopy(bd.buffer, rw.size(), bd.size);
-        c.held = (bd.size + 3) & ~3u;
-        if (!bd.data) rw_in.push_back(c);
-        rw_out.push_back(c);
-        host_rw |= bd.land && bd.data;
-      } else {
-        host_rw = true;
+      std::vector<uint32_t> rw_at(st.rw_buffers);
+      for (uint32_t b = 0; b < st.rw_buffers; b++) {
+        const RwBufferData& bd = d.rw_buffers[b];
+        rw_at[b] = uint32_t(rw.size());
+        table[4 * (st.buffers + b)] = uint32_t(rw.size() / 4);
+        table[4 * (st.buffers + b) + 1] = bd.size;
+        if (bd.buffer) {
+          BufferCopy c = GpuBufferCopy(bd.buffer, rw.size(), bd.size);
+          c.held = (bd.size + 3) & ~3u;
+          if (!bd.data) rw_in.push_back(c);
+          rw_out.push_back(c);
+          host_rw |= bd.land && bd.data;
+        } else {
+          host_rw = true;
+        }
+        AppendWords(rw, bd.data, bd.size);
       }
-      AppendWords(rw, bd.data, bd.size);
-    }
-    if (st.buffers && ro.empty()) ro.resize(4, 0);
-    if (st.rw_buffers && rw.empty()) rw.resize(4, 0);
+      if (st.buffers && ro.empty()) ro.resize(4, 0);
+      if (st.rw_buffers && rw.empty()) rw.resize(4, 0);
 
-    if (!ro.empty() || !rw.empty()) {
-      auto* p = MapUpload(ro.size() + rw.size());
-      SDL_GPUTransferBuffer* tb = upload_tb_;
-      if (!ro.empty()) std::memcpy(p, ro.data(), ro.size());
-      HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) { std::memcpy(p + ro.size() + at, rw.data() + at, n); });
-      SDL_UnmapGPUTransferBuffer(dev_, tb);
-      SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
-      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-      if (!ro.empty()) {
-        EnsureBuffer(cro_, cro_cap_, ro.size(), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
-        SDL_GPUTransferBufferLocation src{tb, upload_at_};
-        SDL_GPUBufferRegion dst{cro_, 0, Uint32(ro.size())};
-        SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+      if (!ro.empty() || !rw.empty()) {
+        auto* p = MapUpload(ro.size() + rw.size());
+        SDL_GPUTransferBuffer* tb = upload_tb_;
+        if (!ro.empty()) std::memcpy(p, ro.data(), ro.size());
+        HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) { std::memcpy(p + ro.size() + at, rw.data() + at, n); });
+        SDL_UnmapGPUTransferBuffer(dev_, tb);
+        SDL_GPUCommandBuffer* cmd = Begin();  // after MapUpload, which may submit it
+        SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+        if (!ro.empty()) {
+          EnsureBuffer(cro_, cro_cap_, ro.size(), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+          SDL_GPUTransferBufferLocation src{tb, upload_at_};
+          SDL_GPUBufferRegion dst{cro_, 0, Uint32(ro.size())};
+          SDL_UploadToGPUBuffer(cp, &src, &dst, true);
+        }
+        if (!rw.empty()) {
+          EnsureBuffer(crw_, crw_cap_, rw.size(),
+                       SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                           SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+          HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) {
+            SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + ro.size() + at)};
+            SDL_GPUBufferRegion dst{crw_, Uint32(at), Uint32(n)};
+            SDL_UploadToGPUBuffer(cp, &src, &dst, false);
+          });
+          CopyBuffers(cp, rw_in, crw_, true);
+        }
+        SDL_EndGPUCopyPass(cp);
       }
-      if (!rw.empty()) {
-        EnsureBuffer(crw_, crw_cap_, rw.size(),
-                     SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
-                         SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
-        HostSpans(rw_in, rw.size(), [&](size_t at, size_t n) {
-          SDL_GPUTransferBufferLocation src{tb, Uint32(upload_at_ + ro.size() + at)};
-          SDL_GPUBufferRegion dst{crw_, Uint32(at), Uint32(n)};
-          SDL_UploadToGPUBuffer(cp, &src, &dst, false);
-        });
-        CopyBuffers(cp, rw_in, crw_, true);
+
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPUStorageTextureReadWriteBinding images[8]{};
+      for (uint32_t i = 0; i < st.rw_images && i < 8; i++) {
+        auto it = textures_.find(d.rw_images[i].tex);
+        if (it == textures_.end() || !it->second.storage)
+          FatalF("gfx: DispatchProgram: image %u is no storage image", i);
+        images[i].texture = it->second.tex;
+        images[i].mip_level = Uint32(d.rw_images[i].level);
       }
-      SDL_EndGPUCopyPass(cp);
-    }
+      SDL_GPUStorageBufferReadWriteBinding rwb{};
+      rwb.buffer = crw_;
+      SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, images, st.rw_images, &rwb,
+                                                       rw.empty() ? 0 : 1);
+      SDL_BindGPUComputePipeline(cp, pr.cp);
+      ProgramStageCmd sc;
+      RecordStage(sc, st, d.cs);
+      if (sc.ntex) {
+        SDL_GPUTextureSamplerBinding tbs[16];
+        for (uint32_t i = 0; i < sc.ntex; i++) tbs[i] = {sc.tex[i], sc.smp[i]};
+        SDL_BindGPUComputeSamplers(cp, 0, tbs, sc.ntex);
+      }
+      SDL_GPUBuffer* bufs[2] = {cro_, heap_};
+      if (!ro.empty()) SDL_BindGPUComputeStorageBuffers(cp, 0, bufs, 2);
+      Uint32 slot = 0;
+      if (!table.empty()) SDL_PushGPUComputeUniformData(cmd, slot++, table.data(), Uint32(table.size() * 4));
+      if (st.uniform_bytes)
+        SDL_PushGPUComputeUniformData(cmd, slot, d.cs.uniforms, st.uniform_bytes);
+      SDL_DispatchGPUCompute(cp, d.groups[0], d.groups[1], d.groups[2]);
+      SDL_EndGPUComputePass(cp);
 
-    SDL_GPUCommandBuffer* cmd = Begin();
-    SDL_GPUStorageTextureReadWriteBinding images[8]{};
-    for (uint32_t i = 0; i < st.rw_images && i < 8; i++) {
-      auto it = textures_.find(d.rw_images[i].tex);
-      if (it == textures_.end() || !it->second.storage)
-        FatalF("gfx: DispatchProgram: image %u is no storage image", i);
-      images[i].texture = it->second.tex;
-      images[i].mip_level = Uint32(d.rw_images[i].level);
-    }
-    SDL_GPUStorageBufferReadWriteBinding rwb{};
-    rwb.buffer = crw_;
-    SDL_GPUComputePass* cp = SDL_BeginGPUComputePass(cmd, images, st.rw_images, &rwb,
-                                                     rw.empty() ? 0 : 1);
-    SDL_BindGPUComputePipeline(cp, pr.cp);
-    ProgramStageCmd sc;
-    RecordStage(sc, st, d.cs);
-    if (sc.ntex) {
-      SDL_GPUTextureSamplerBinding tbs[16];
-      for (uint32_t i = 0; i < sc.ntex; i++) tbs[i] = {sc.tex[i], sc.smp[i]};
-      SDL_BindGPUComputeSamplers(cp, 0, tbs, sc.ntex);
-    }
-    SDL_GPUBuffer* bufs[2] = {cro_, heap_};
-    if (!ro.empty()) SDL_BindGPUComputeStorageBuffers(cp, 0, bufs, 2);
-    Uint32 slot = 0;
-    if (!table.empty()) SDL_PushGPUComputeUniformData(cmd, slot++, table.data(), Uint32(table.size() * 4));
-    if (st.uniform_bytes)
-      SDL_PushGPUComputeUniformData(cmd, slot, d.cs.uniforms, st.uniform_bytes);
-    SDL_DispatchGPUCompute(cp, d.groups[0], d.groups[1], d.groups[2]);
-    SDL_EndGPUComputePass(cp);
-
-    if (!rw_out.empty()) {
-      SDL_GPUCopyPass* out = SDL_BeginGPUCopyPass(cmd);
-      CopyBuffers(out, rw_out, crw_, false);
-      SDL_EndGPUCopyPass(out);
-    }
-    if (!host_rw) {
+      if (!rw_out.empty()) {
+        SDL_GPUCopyPass* out = SDL_BeginGPUCopyPass(cmd);
+        CopyBuffers(out, rw_out, crw_, false);
+        SDL_EndGPUCopyPass(out);
+      }
+      if (!host_rw) {
+        Submit(cmd);
+        return;
+      }
+      Landing w;
+      w.cap = Uint32(rw.size());
+      for (size_t i = 0; i < download_pool_.size(); i++) {
+        if (download_pool_[i].cap < w.cap) continue;
+        w = download_pool_[i];
+        download_pool_.erase(download_pool_.begin() + i);
+        break;
+      }
+      if (!w.tb) w.tb = NewDownload(w.cap);
+      SDL_GPUCopyPass* down = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUBufferRegion src{crw_, 0, Uint32(rw.size())};
+      SDL_GPUTransferBufferLocation dst{w.tb, 0};
+      SDL_DownloadFromGPUBuffer(down, &src, &dst);
+      SDL_EndGPUCopyPass(down);
+      w.submission = submitted_ + 1;  // the open command buffer's
       Submit(cmd);
-      return;
-    }
-    Landing w;
-    w.cap = Uint32(rw.size());
-    for (size_t i = 0; i < download_pool_.size(); i++) {
-      if (download_pool_[i].cap < w.cap) continue;
-      w = download_pool_[i];
-      download_pool_.erase(download_pool_.begin() + i);
-      break;
-    }
-    if (!w.tb) w.tb = NewDownload(w.cap);
-    SDL_GPUCopyPass* down = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUBufferRegion src{crw_, 0, Uint32(rw.size())};
-    SDL_GPUTransferBufferLocation dst{w.tb, 0};
-    SDL_DownloadFromGPUBuffer(down, &src, &dst);
-    SDL_EndGPUCopyPass(down);
-    w.submission = submitted_ + 1;  // the open command buffer's
-    Submit(cmd);
-    for (uint32_t b = 0; b < st.rw_buffers; b++)
-      if (d.rw_buffers[b].data && (!d.rw_buffers[b].buffer || d.rw_buffers[b].land))
-        w.out.push_back({d.rw_buffers[b].data, rw_at[b], d.rw_buffers[b].size});
-    w.later = d.land_later;
-    writes_queued_ += w.later;
-    landings_.push_back(std::move(w));
-    if (!d.land_later) Land(landings_.size(), true);
+      for (uint32_t b = 0; b < st.rw_buffers; b++)
+        if (d.rw_buffers[b].data && (!d.rw_buffers[b].buffer || d.rw_buffers[b].land))
+          w.out.push_back({d.rw_buffers[b].data, rw_at[b], d.rw_buffers[b].size});
+      w.later = d.land_later;
+      writes_queued_ += w.later;
+      landings_.push_back(std::move(w));
+      if (!d.land_later) Land(landings_.size(), true);
+    });
   }
 
   uint64_t WritesQueued() override {
@@ -1864,7 +1909,7 @@ void r_color0(inout vec4 c) {
 
   uint64_t LandWrites(bool wait) override {
     std::lock_guard<std::recursive_mutex> l(mu_);
-    Land(landings_.size(), wait);
+    OnEncoder([&] { Land(landings_.size(), wait); });
     return writes_landed_;
   }
 
@@ -1895,16 +1940,12 @@ void r_color0(inout vec4 c) {
     const Tex& t = it->second;
     Flush();
     if (!present_pipeline_) CreatePresentPipeline();
-    SDL_GPUCommandBuffer* cmd = Begin();
     SDL_GPUColorTargetInfo ct{};
     ct.texture = backbuffer_;
     ct.load_op = SDL_GPU_LOADOP_CLEAR;
     ct.clear_color = {0, 0, 0, 1};
     ct.store_op = SDL_GPU_STOREOP_STORE;
-    SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr);
-    SDL_BindGPUGraphicsPipeline(rp, present_pipeline_);
     SDL_GPUTextureSamplerBinding tb{t.tex, Sampler(SamplerKey{})};
-    SDL_BindGPUFragmentSamplers(rp, 0, &tb, 1);
     // The region's corner, its far corner, and whether to encode as sRGB.
     const int32_t u[4] = {r.left, r.top, std::min(r.right, t.w) - 1,
                           t.fmt == Format::R8G8B8A8Srgb || t.fmt == Format::B8G8R8A8Srgb ||
@@ -1913,13 +1954,19 @@ void r_color0(inout vec4 c) {
                               ? 1
                               : 0};
     const int32_t bottom = std::min(r.bottom, t.h) - 1;
-    const int32_t ub[8] = {u[0], u[1], u[2], bottom, u[3], 0, 0, 0};
-    SDL_PushGPUFragmentUniformData(cmd, 0, ub, sizeof ub);
-    SDL_GPUViewport vp{0, 0, float(bb_w_), float(bb_h_), 0, 1};
-    SDL_SetGPUViewport(rp, &vp);
-    SDL_DrawGPUPrimitives(rp, 3, 1, 0, 0);
-    SDL_EndGPURenderPass(rp);
-    Submit(cmd);
+    const std::array<int32_t, 8> ub = {u[0], u[1], u[2], bottom, u[3], 0, 0, 0};
+    const SDL_GPUViewport vp{0, 0, float(bb_w_), float(bb_h_), 0, 1};
+    Post([this, ct, tb, ub, vp, pipeline = present_pipeline_] {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ct, 1, nullptr);
+      SDL_BindGPUGraphicsPipeline(rp, pipeline);
+      SDL_BindGPUFragmentSamplers(rp, 0, &tb, 1);
+      SDL_PushGPUFragmentUniformData(cmd, 0, ub.data(), sizeof ub);
+      SDL_SetGPUViewport(rp, &vp);
+      SDL_DrawGPUPrimitives(rp, 3, 1, 0, 0);
+      SDL_EndGPURenderPass(rp);
+      Submit(cmd);
+    });
   }
 
   void Present() override {
@@ -1927,14 +1974,17 @@ void r_color0(inout vec4 c) {
     std::lock_guard<std::recursive_mutex> l(mu_);
     const uint64_t t0 = SDL_GetTicksNS();
     Flush();
-    SDL_GPUCommandBuffer* cmd = Begin();
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTextureLocation s{}, d{};
-    s.texture = backbuffer_;
-    d.texture = front_;
-    SDL_CopyGPUTextureToTexture(cp, &s, &d, Uint32(bb_w_), Uint32(bb_h_), 1, false);
-    SDL_EndGPUCopyPass(cp);
-    Show(cmd);
+    OnEncoder([&] {
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUTextureLocation s{}, d{};
+      s.texture = backbuffer_;
+      d.texture = front_;
+      SDL_CopyGPUTextureToTexture(cp, &s, &d, Uint32(bb_w_), Uint32(bb_h_), 1, false);
+      SDL_EndGPUCopyPass(cp);
+      if (Threaded()) SubmitOpen();  // Show acquires its own command buffer
+    });
+    Show(Begin());
     SubmitOpen();
     if (overlay::TelemetryMode()) overlay::NoteFrame(double(SDL_GetTicksNS() - t0) / 1e6, bb_w_, bb_h_);
   }
@@ -1994,6 +2044,7 @@ void r_color0(inout vec4 c) {
     uint32_t uoff[6] = {}, ulen[6] = {};
     SDL_FColor blend_constant{};
     ShaderKey key{};
+    SDL_GPUGraphicsPipeline* pipeline = nullptr;  // ShaderPipeline(key), looked up when recorded
   };
   struct Shader {
     SDL_GPUShader* sh = nullptr;
@@ -2247,7 +2298,7 @@ void r_color0(inout vec4 c) {
   uint8_t* MapUpload(size_t bytes) {
     bytes = (bytes + 255) & ~size_t(255);
     if (!upload_tb_ || upload_tb_cap_ < 2 * bytes) {
-      Drain();
+      GpuIdle();
       if (upload_tb_) SDL_ReleaseGPUTransferBuffer(dev_, upload_tb_);
       upload_tb_cap_ = std::max<uint32_t>(upload_tb_cap_, 32u << 20);
       while (upload_tb_cap_ < 2 * bytes) upload_tb_cap_ *= 2;
@@ -2284,7 +2335,7 @@ void r_color0(inout vec4 c) {
     in_flight_.pop_front();
   }
 
-  void Drain() {
+  void GpuIdle() {
     SubmitOpen();
     while (!in_flight_.empty()) Retire();
     upload_tail_ = upload_head_;
@@ -2304,7 +2355,7 @@ void r_color0(inout vec4 c) {
 
   // The end of a unit of work recorded into Begin()'s command buffer (a
   // flush, a dispatch, a copy): every kBatch of them it is submitted.
-  // Waits for the GPU (Retire, Drain, Land) submit it first.
+  // Waits for the GPU (Retire, GpuIdle, Land) submit it first.
   void Submit(SDL_GPUCommandBuffer* cmd) {
     if (cmd == open_ && ++open_units_ >= kBatch) SubmitOpen();
   }
@@ -2325,24 +2376,160 @@ void r_color0(inout vec4 c) {
       Retire();
   }
 
+  // ---- the encoder: flushes and posted work, in order, on encoder_
+
+  bool Threaded() const { return encoder_.joinable(); }
+
+  struct Batch;  // with the members
+  // The encoder's job: a flush's batch, or else fn.
+  struct Job {
+    std::unique_ptr<Batch> batch;
+    std::function<void()> fn;
+  };
+
+  void Run(Job j) {
+    if (!Threaded()) {
+      RunJob(j);
+      return;
+    }
+    {
+      std::lock_guard<std::mutex> l(q_mu_);
+      jobs_.push_back(std::move(j));
+    }
+    q_cv_.notify_one();
+  }
+
+  // Command buffer work after everything flushed so far.
+  void Post(std::function<void()> fn) { Run({nullptr, std::move(fn)}); }
+
+  // f on the encoder, waited for: work on the GPU state the encoder owns
+  // (the command buffer, the upload ring, the submissions).
+  template <class F>
+  void OnEncoder(F&& f) {
+    if (!Threaded()) {
+      f();
+      return;
+    }
+    Post([&f] { f(); });
+    Drain();
+  }
+
+  // Waits until the encoder has run every job (it takes no mu_).
+  void Drain() {
+    if (!Threaded()) return;
+    std::unique_lock<std::mutex> l(q_mu_);
+    idle_cv_.wait(l, [this] { return jobs_.empty() && !busy_; });
+  }
+
+  // Released after the flushes queued before, which may use it.
+  void Release(SDL_GPUTexture* t) {
+    Post([this, t] { SDL_ReleaseGPUTexture(dev_, t); });
+  }
+
+  std::unique_ptr<Batch> TakeBatch() {
+    std::lock_guard<std::mutex> l(q_mu_);
+    if (free_batches_.empty()) return std::make_unique<Batch>();
+    std::unique_ptr<Batch> b = std::move(free_batches_.back());
+    free_batches_.pop_back();
+    return b;
+  }
+
+  void RunJob(Job& j) {
+    if (!j.batch) {
+      j.fn();
+      return;
+    }
+    Encode(*j.batch);
+    Batch& b = *j.batch;
+    b.cmds.clear();
+    b.shader_cmds.clear();
+    b.program_cmds.clear();
+    b.pmem.clear();
+    b.ubytes.clear();
+    b.uploads.clear();
+    b.upload_bytes.clear();
+    b.verts.clear();
+    b.indices.clear();
+    b.vs_list.clear();
+    b.vl_list.clear();
+    b.fs_list.clear();
+    std::lock_guard<std::mutex> l(q_mu_);
+    free_batches_.push_back(std::move(j.batch));
+  }
+
+  void EncoderLoop() {
+    std::unique_lock<std::mutex> l(q_mu_);
+    for (;;) {
+      q_cv_.wait(l, [this] { return stop_ || !jobs_.empty(); });
+      if (jobs_.empty()) return;
+      Job j = std::move(jobs_.front());
+      jobs_.pop_front();
+      busy_ = true;
+      l.unlock();
+      RunJob(j);
+      l.lock();
+      busy_ = false;
+      if (jobs_.empty()) idle_cv_.notify_all();
+    }
+  }
+
+  // Hands what was recorded since the last flush to the encoder, with the
+  // pass it is for; the lists start over empty (a recycled batch's).
   void Flush() {
     bool draw = !cmds_.empty() || pass_clear_color_ || pass_clear_depth_ || pass_clear_stencil_;
     if (!draw && uploads_.empty()) return;
+    std::unique_ptr<Batch> b = TakeBatch();
+    b->cmds.swap(cmds_);
+    b->shader_cmds.swap(shader_cmds_);
+    b->program_cmds.swap(program_cmds_);
+    b->pmem.swap(pmem_);
+    b->ubytes.swap(ubytes_);
+    b->uploads.swap(uploads_);
+    b->upload_bytes.swap(upload_bytes_);
+    b->verts.swap(verts_);
+    b->indices.swap(indices_);
+    b->vs_list.swap(vs_list_);
+    b->vl_list.swap(vl_list_);
+    b->fs_list.swap(fs_list_);
+    b->colors = pass_colors_;
+    b->levels = pass_levels_;
+    b->faces = pass_faces_;
+    b->targets = pass_targets_;
+    b->color = pass_color_;
+    b->depth = pass_depth_;
+    b->depth_layer = pass_depth_layer_;
+    b->clear_color = pass_clear_color_;
+    b->clear_depth = pass_clear_depth_;
+    b->clear_stencil = pass_clear_stencil_;
+    b->clear_color_value = clear_color_;
+    b->clear_depth_value = clear_depth_;
+    b->clear_stencil_value = clear_stencil_;
+    draw_read_.clear();
+    zeros_at_ = -1;
+    locked_ = {};
+    blit_used_ = 0;
+    pass_clear_color_ = pass_clear_depth_ = pass_clear_stencil_ = false;
+    Run({std::move(b), {}});
+  }
+
+  // A flush's copy pass and render pass, on the encoder.
+  void Encode(const Batch& b) {
+    bool draw = !b.cmds.empty() || b.clear_color || b.clear_depth || b.clear_stencil;
     SDL_GPUCommandBuffer* cmd = nullptr;
-    size_t vbytes = verts_.size(), ibytes = indices_.size() * 4, pbytes = pmem_.size();
-    size_t ubytes = (upload_bytes_.size() + 15) & ~size_t(15);
+    size_t vbytes = b.verts.size(), ibytes = b.indices.size() * 4, pbytes = b.pmem.size();
+    size_t ubytes = (b.upload_bytes.size() + 15) & ~size_t(15);
     size_t total = ubytes + vbytes + ibytes + pbytes;
     if (total) {
       auto* p = MapUpload(total);
-      if (!upload_bytes_.empty()) std::memcpy(p, upload_bytes_.data(), upload_bytes_.size());
-      if (vbytes) std::memcpy(p + ubytes, verts_.data(), vbytes);
-      if (ibytes) std::memcpy(p + ubytes + vbytes, indices_.data(), ibytes);
-      if (pbytes) std::memcpy(p + ubytes + vbytes + ibytes, pmem_.data(), pbytes);
+      if (!b.upload_bytes.empty()) std::memcpy(p, b.upload_bytes.data(), b.upload_bytes.size());
+      if (vbytes) std::memcpy(p + ubytes, b.verts.data(), vbytes);
+      if (ibytes) std::memcpy(p + ubytes + vbytes, b.indices.data(), ibytes);
+      if (pbytes) std::memcpy(p + ubytes + vbytes + ibytes, b.pmem.data(), pbytes);
       SDL_UnmapGPUTransferBuffer(dev_, upload_tb_);
 
       cmd = Begin();  // after MapUpload, which may submit it
       SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-      for (const Upload& u : uploads_) {
+      for (const Upload& u : b.uploads) {
         SDL_GPUTextureTransferInfo src{};
         src.transfer_buffer = upload_tb_;
         src.offset = upload_at_ + u.offset;
@@ -2382,41 +2569,41 @@ void r_color0(inout vec4 c) {
     }
 
     if (!cmd) cmd = Begin();
-    if (draw && (pass_color_ || pass_depth_)) {
+    if (draw && (b.color || b.depth)) {
       // A clear clears every target, as D3D9's does.
       SDL_GPUColorTargetInfo cts[4]{};
-      for (int i = 0; i < pass_targets_; i++) {
+      for (int i = 0; i < b.targets; i++) {
         SDL_GPUColorTargetInfo& ct = cts[i];
-        ct.texture = pass_colors_[i];
-        ct.mip_level = Uint32(pass_levels_[i]);
-        ct.layer_or_depth_plane = Uint32(pass_faces_[i]);
-        ct.load_op = pass_clear_color_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
-        ct.clear_color = clear_color_;
+        ct.texture = b.colors[i];
+        ct.mip_level = Uint32(b.levels[i]);
+        ct.layer_or_depth_plane = Uint32(b.faces[i]);
+        ct.load_op = b.clear_color ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+        ct.clear_color = b.clear_color_value;
         ct.store_op = SDL_GPU_STOREOP_STORE;
       }
       SDL_GPUDepthStencilTargetInfo dt{};
-      if (pass_depth_) {
-        dt.texture = pass_depth_;
-        dt.load_op = pass_clear_depth_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
-        dt.clear_depth = clear_depth_;
+      if (b.depth) {
+        dt.texture = b.depth;
+        dt.load_op = b.clear_depth ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+        dt.clear_depth = b.clear_depth_value;
         dt.store_op = SDL_GPU_STOREOP_STORE;
-        dt.stencil_load_op = pass_clear_stencil_ ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+        dt.stencil_load_op = b.clear_stencil ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
         dt.stencil_store_op = SDL_GPU_STOREOP_STORE;
-        dt.clear_stencil = clear_stencil_;
-        dt.layer = Uint8(pass_depth_layer_);
+        dt.clear_stencil = b.clear_stencil_value;
+        dt.layer = Uint8(b.depth_layer);
       }
       SDL_GPURenderPass* rp =
-          SDL_BeginGPURenderPass(cmd, cts, Uint32(pass_targets_), pass_depth_ ? &dt : nullptr);
+          SDL_BeginGPURenderPass(cmd, cts, Uint32(b.targets), b.depth ? &dt : nullptr);
       if (vbuf_) SDL_BindGPUVertexStorageBuffers(rp, 0, &vbuf_, 1);
       SDL_GPUBuffer* bound_ib = nullptr;  // ibuf_, or the heap at a draw's GPU buffer
       uint32_t bound_at = 0;
       bool bound_short = false;
-      auto bind_indices = [&](SDL_GPUBuffer* b, uint32_t at = 0, bool short_indices = false) {
-        if (b == bound_ib && at == bound_at && short_indices == bound_short) return;
-        SDL_GPUBufferBinding ib{b, at};
+      auto bind_indices = [&](SDL_GPUBuffer* buf, uint32_t at = 0, bool short_indices = false) {
+        if (buf == bound_ib && at == bound_at && short_indices == bound_short) return;
+        SDL_GPUBufferBinding ib{buf, at};
         SDL_BindGPUIndexBuffer(rp, &ib, short_indices ? SDL_GPU_INDEXELEMENTSIZE_16BIT
                                                        : SDL_GPU_INDEXELEMENTSIZE_32BIT);
-        bound_ib = b;
+        bound_ib = buf;
         bound_at = at;
         bound_short = short_indices;
       };
@@ -2424,17 +2611,17 @@ void r_color0(inout vec4 c) {
       SDL_GPUGraphicsPipeline* bound = nullptr;
       bool vertex_storage = vbuf_ != nullptr;  // vbuf_ at slot 0 for the other draws
       int vs = -1, fs = -1, vl = -1;
-      uint32_t pushed[6];  // ubytes_ offsets pushed per shader uniform slot
+      uint32_t pushed[6];  // ubytes offsets pushed per shader uniform slot
       std::fill(std::begin(pushed), std::end(pushed), ~0u);
       bool have_constant = false;
       SDL_FColor constant{};
-      for (const Cmd& c : cmds_) {
+      for (const Cmd& c : b.cmds) {
         if (c.program < 0 && !vertex_storage && vbuf_) {
           SDL_BindGPUVertexStorageBuffers(rp, 0, &vbuf_, 1);
           vertex_storage = true;
         }
         if (c.program >= 0) {
-          const ProgramCmd& pc = program_cmds_[size_t(c.program)];
+          const ProgramCmd& pc = b.program_cmds[size_t(c.program)];
           if (pc.pipeline != bound) {
             SDL_BindGPUGraphicsPipeline(rp, pc.pipeline);
             bound = pc.pipeline;
@@ -2444,7 +2631,7 @@ void r_color0(inout vec4 c) {
           for (int st = 0; st < 2; st++) {
             const ProgramStageCmd& sc = pc.stage[st];
             for (uint32_t i = 0; i < sc.nuni; i++) {
-              const uint8_t* data = ubytes_.data() + sc.uoff[i];
+              const uint8_t* data = b.ubytes.data() + sc.uoff[i];
               if (st) SDL_PushGPUFragmentUniformData(cmd, i, data, sc.ulen[i]);
               else SDL_PushGPUVertexUniformData(cmd, i, data, sc.ulen[i]);
             }
@@ -2482,15 +2669,15 @@ void r_color0(inout vec4 c) {
           continue;
         }
         if (c.shader >= 0) {
-          const ShaderCmd& sc = shader_cmds_[size_t(c.shader)];
-          SDL_GPUGraphicsPipeline* p = ShaderPipeline(sc.key);
+          const ShaderCmd& sc = b.shader_cmds[size_t(c.shader)];
+          SDL_GPUGraphicsPipeline* p = sc.pipeline;
           if (p != bound) {
             SDL_BindGPUGraphicsPipeline(rp, p);
             bound = p;
           }
           for (int i = 0; i < 6; i++) {
             if (pushed[i] == sc.uoff[i]) continue;
-            const uint8_t* data = ubytes_.data() + sc.uoff[i];
+            const uint8_t* data = b.ubytes.data() + sc.uoff[i];
             if (i < 3) SDL_PushGPUVertexUniformData(cmd, Uint32(i), data, sc.ulen[i]);
             else SDL_PushGPUFragmentUniformData(cmd, Uint32(i - 3), data, sc.ulen[i]);
             pushed[i] = sc.uoff[i];
@@ -2513,15 +2700,15 @@ void r_color0(inout vec4 c) {
           }
           std::fill(std::begin(pushed), std::end(pushed), ~0u);
           if (c.vs != vs) {
-            SDL_PushGPUVertexUniformData(cmd, 0, &vs_list_[size_t(c.vs)], sizeof(VsUniforms));
+            SDL_PushGPUVertexUniformData(cmd, 0, &b.vs_list[size_t(c.vs)], sizeof(VsUniforms));
             vs = c.vs;
           }
           if (c.vl != vl) {
-            SDL_PushGPUVertexUniformData(cmd, 1, &vl_list_[size_t(c.vl)], sizeof(VsLayout));
+            SDL_PushGPUVertexUniformData(cmd, 1, &b.vl_list[size_t(c.vl)], sizeof(VsLayout));
             vl = c.vl;
           }
           if (c.fs != fs) {
-            SDL_PushGPUFragmentUniformData(cmd, 0, &fs_list_[size_t(c.fs)], sizeof(FsUniforms));
+            SDL_PushGPUFragmentUniformData(cmd, 0, &b.fs_list[size_t(c.fs)], sizeof(FsUniforms));
             fs = c.fs;
           }
           SDL_GPUTextureSamplerBinding tb[16];
@@ -2544,24 +2731,6 @@ void r_color0(inout vec4 c) {
       SDL_EndGPURenderPass(rp);
     }
     Submit(cmd);
-
-    cmds_.clear();
-    shader_cmds_.clear();
-    program_cmds_.clear();
-    pmem_.clear();
-    draw_read_.clear();
-    ubytes_.clear();
-    uploads_.clear();
-    upload_bytes_.clear();
-    verts_.clear();
-    zeros_at_ = -1;
-    locked_ = {};
-    indices_.clear();
-    vs_list_.clear();
-    vl_list_.clear();
-    fs_list_.clear();
-    blit_used_ = 0;
-    pass_clear_color_ = pass_clear_depth_ = pass_clear_stencil_ = false;
   }
 
   // Front buffer to the window: scaled to fit with its aspect kept,
@@ -2729,33 +2898,35 @@ void r_color0(inout vec4 c) {
     rd.c = Clip(r, tw, th);
     int w = rd.c.right - rd.c.left, h = rd.c.bottom - rd.c.top;
     if (w <= 0 || h <= 0 || !tex) return rd;
-    uint32_t bytes = uint32_t(w) * uint32_t(h) * 4;
-    if (!shared) {
-      rd.tb = NewDownload(bytes);
-      rd.own = true;
-    } else {
-      rd.tb = SharedDownload(bytes);
-    }
-    SubmitOpen();  // the work before it, tracked with the ring
-    SDL_GPUCommandBuffer* cmd = Begin();
-    SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-    SDL_GPUTextureRegion src{};
-    src.texture = tex;
-    src.mip_level = Uint32(level);
-    src.x = Uint32(rd.c.left);
-    src.y = Uint32(rd.c.top);
-    src.w = Uint32(w);
-    src.h = Uint32(h);
-    src.d = 1;
-    SDL_GPUTextureTransferInfo d{};
-    d.transfer_buffer = rd.tb;
-    d.pixels_per_row = Uint32(w);
-    d.rows_per_layer = Uint32(h);
-    SDL_DownloadFromGPUTexture(cp, &src, &d);
-    SDL_EndGPUCopyPass(cp);
-    open_ = nullptr;  // submitted here, with a fence of its own
-    rd.fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-    if (!rd.fence) FatalF("gfx: SDL_SubmitGPUCommandBuffer: %s", SDL_GetError());
+    OnEncoder([&] {
+      uint32_t bytes = uint32_t(w) * uint32_t(h) * 4;
+      if (!shared) {
+        rd.tb = NewDownload(bytes);
+        rd.own = true;
+      } else {
+        rd.tb = SharedDownload(bytes);
+      }
+      SubmitOpen();  // the work before it, tracked with the ring
+      SDL_GPUCommandBuffer* cmd = Begin();
+      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+      SDL_GPUTextureRegion src{};
+      src.texture = tex;
+      src.mip_level = Uint32(level);
+      src.x = Uint32(rd.c.left);
+      src.y = Uint32(rd.c.top);
+      src.w = Uint32(w);
+      src.h = Uint32(h);
+      src.d = 1;
+      SDL_GPUTextureTransferInfo d{};
+      d.transfer_buffer = rd.tb;
+      d.pixels_per_row = Uint32(w);
+      d.rows_per_layer = Uint32(h);
+      SDL_DownloadFromGPUTexture(cp, &src, &d);
+      SDL_EndGPUCopyPass(cp);
+      open_ = nullptr;  // submitted here, with a fence of its own
+      rd.fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+      if (!rd.fence) FatalF("gfx: SDL_SubmitGPUCommandBuffer: %s", SDL_GetError());
+    });
     return rd;
   }
 
@@ -2833,7 +3004,7 @@ void r_color0(inout vec4 c) {
     if (blit_pool_[slot].w < w || blit_pool_[slot].h < h) {
       if (blit_pool_[slot].tex) {
         Flush();  // recorded blits may still use the old one
-        SDL_ReleaseGPUTexture(dev_, blit_pool_[slot].tex);
+        Release(blit_pool_[slot].tex);
         blit_used_ = slot + 1;
       }
       BlitTex& b = blit_pool_[slot];
@@ -3668,17 +3839,19 @@ void r_color0(inout vec4 c) {
     bi.size = Uint32(cap);
     SDL_GPUBuffer* b = SDL_CreateGPUBuffer(dev_, &bi);
     if (!b) FatalF("gfx: cannot create a %u-byte buffer: %s", bi.size, SDL_GetError());
-    if (heap_) {
-      SDL_GPUCommandBuffer* cmd = Begin();
-      SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
-      SDL_GPUBufferLocation from{heap_, 0}, to{b, 0};
-      SDL_CopyGPUBufferToBuffer(cp, &from, &to, heap_cap_, false);
-      SDL_EndGPUCopyPass(cp);
-      Submit(cmd);
-      SDL_ReleaseGPUBuffer(dev_, heap_);
-    }
+    OnEncoder([&] {  // queued flushes read heap_
+      if (heap_) {
+        SDL_GPUCommandBuffer* cmd = Begin();
+        SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(cmd);
+        SDL_GPUBufferLocation from{heap_, 0}, to{b, 0};
+        SDL_CopyGPUBufferToBuffer(cp, &from, &to, heap_cap_, false);
+        SDL_EndGPUCopyPass(cp);
+        Submit(cmd);
+        SDL_ReleaseGPUBuffer(dev_, heap_);
+      }
+      heap_ = b;
+    });
     HeapFree(heap_cap_, uint32_t(cap - heap_cap_));
-    heap_ = b;
     heap_cap_ = uint32_t(cap);
   }
   // A read-only GPU buffer's table entry: its words' place in the heap,
@@ -4144,6 +4317,41 @@ void r_color0(inout vec4 c) {
   bool vs_dirty_ = true, fs_dirty_ = true;
   VsUniforms vs_cur_{};
   FsUniforms fs_cur_{};
+
+  // A flush for the encoder: the lists recorded and the pass they are for.
+  struct Batch {
+    std::vector<Cmd> cmds;
+    std::vector<ShaderCmd> shader_cmds;
+    std::vector<ProgramCmd> program_cmds;
+    Arena pmem;
+    std::vector<uint8_t> ubytes;
+    std::vector<Upload> uploads;
+    std::vector<uint8_t> upload_bytes;
+    std::vector<uint8_t, NoZero<uint8_t>> verts;
+    std::vector<uint32_t, NoZero<uint32_t>> indices;
+    std::vector<VsUniforms> vs_list;
+    std::vector<VsLayout> vl_list;
+    std::vector<FsUniforms> fs_list;
+    std::array<SDL_GPUTexture*, 4> colors{};
+    std::array<int, 4> levels{}, faces{};
+    int targets = 0;
+    SDL_GPUTexture* color = nullptr;
+    SDL_GPUTexture* depth = nullptr;
+    int depth_layer = 0;
+    bool clear_color = false, clear_depth = false, clear_stencil = false;
+    SDL_FColor clear_color_value{};
+    float clear_depth_value = 1;
+    uint8_t clear_stencil_value = 0;
+  };
+  // Owned by the encoder while it runs: the command buffer and
+  // submissions (open_, in_flight_, ...), the upload ring, vbuf_, ibuf_,
+  // pbuf_, pipelines_; heap_ changes only on it (GrowHeap).
+  std::thread encoder_;
+  std::mutex q_mu_;
+  std::condition_variable q_cv_, idle_cv_;
+  std::deque<Job> jobs_;
+  bool busy_ = false, stop_ = false;
+  std::vector<std::unique_ptr<Batch>> free_batches_;
 };
 
 }  // namespace
