@@ -1,7 +1,8 @@
 // ws2_32 (Winsock 2): UDP and TCP sockets on host BSD sockets. SOCKETs are
 // handles in the kernel32 table; sockaddrs are converted (the families'
 // values differ, and BSD's have a length byte). Imported by ordinal or by
-// name, so each function is registered under both.
+// name, so each function is registered under both; wsock32 exports the
+// same functions under the same ordinals.
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -10,9 +11,13 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <poll.h>
+
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include "runtime/log.h"
 #include "win32/hle.h"
@@ -135,7 +140,7 @@ void ToGuest(const sockaddr_storage& in, gaddr sa, gaddr len_va) {
 
 }  // namespace
 
-#define RECOMP_WS2(ord, name, nargs)                                                \
+#define RECOMP_WS2_ONLY(ord, name, nargs)                                           \
   static uint64_t ws_##name(::recomp::Ctx& c);                                      \
   static ::recomp::hle::Registrar ws_reg_##name{"ws2_32.dll", #name, nargs,         \
                                                 &ws_##name, true};                  \
@@ -143,9 +148,15 @@ void ToGuest(const sockaddr_storage& in, gaddr sa, gaddr len_va) {
                                                 &ws_##name, true};                  \
   static uint64_t ws_##name([[maybe_unused]] ::recomp::Ctx& c)
 
+#define RECOMP_WS2(ord, name, nargs)                                                \
+  static uint64_t ws_##name(::recomp::Ctx& c);                                      \
+  static ::recomp::hle::Registrar ws_wsock_##name{"wsock32.dll", "#" #ord, nargs,   \
+                                                  &ws_##name, true};                \
+  RECOMP_WS2_ONLY(ord, name, nargs)
+
 // WSADATA: version 2.2. Win64 moves iMaxSockets, iMaxUdpDg and lpVendorInfo
 // before the strings.
-RECOMP_WS2(115, WSAStartup, 2) {
+RECOMP_WS2_ONLY(115, WSAStartup, 2) {
   gaddr d = Arg(c, 1);
   const bool x64 = g_proc->x64;
   std::memset(GPtr(d), 0, x64 ? 408 : 400);
@@ -162,6 +173,18 @@ RECOMP_WS2(112, WSASetLastError, 1) {
   return 0;
 }
 
+// A SOCKET for a host descriptor.
+uint64_t NewSocket(int fd) {
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
+  auto o = std::make_shared<SocketObject>();
+  o->fd = fd;
+  return NewHandle(o);
+}
+
 RECOMP_WS2(23, socket, 3) {
   int af = HostFamily(uint16_t(Arg(c, 0)));
   if (af < 0) {
@@ -173,14 +196,7 @@ RECOMP_WS2(23, socket, 3) {
     t_wsa_error = WsaError(errno);
     return InvalidSocket();
   }
-  fcntl(fd, F_SETFD, FD_CLOEXEC);
-#ifdef SO_NOSIGPIPE
-  int one = 1;
-  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-#endif
-  auto o = std::make_shared<SocketObject>();
-  o->fd = fd;
-  return NewHandle(o);
+  return NewSocket(fd);
 }
 
 RECOMP_WS2(3, closesocket, 1) {
@@ -242,6 +258,180 @@ RECOMP_WS2(17, recvfrom, 6) {
   if (n < 0) return FailErrno();
   ToGuest(sa, Arg(c, 4), Arg(c, 5));
   return uint32_t(n);
+}
+
+RECOMP_WS2(1, accept, 3) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) {
+    t_wsa_error = kWsaENotSock;
+    return InvalidSocket();
+  }
+  sockaddr_storage sa{};
+  socklen_t len = sizeof sa;
+  int n = ::accept(fd, reinterpret_cast<sockaddr*>(&sa), &len);
+  if (n < 0) {
+    t_wsa_error = WsaError(errno);
+    return InvalidSocket();
+  }
+  ToGuest(sa, Arg(c, 1), Arg(c, 2));
+  return NewSocket(n);
+}
+
+RECOMP_WS2(4, connect, 3) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  sockaddr_storage sa;
+  socklen_t len;
+  if (!ToHost(Arg(c, 1), uint32_t(Arg(c, 2)), &sa, &len)) return Fail(kWsaEAfNoSupport);
+  if (::connect(fd, reinterpret_cast<sockaddr*>(&sa), len) == 0) return 0;
+  return errno == EINPROGRESS ? Fail(kWsaEWouldBlock) : FailErrno();  // non-blocking connect
+}
+
+RECOMP_WS2(6, getsockname, 3) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  sockaddr_storage sa{};
+  socklen_t len = sizeof sa;
+  if (::getsockname(fd, reinterpret_cast<sockaddr*>(&sa), &len) != 0) return FailErrno();
+  ToGuest(sa, Arg(c, 1), Arg(c, 2));
+  return 0;
+}
+
+RECOMP_WS2(13, listen, 2) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  int backlog = int(Arg(c, 1));  // SOMAXCONN is 0x7FFFFFFF
+  return ::listen(fd, std::clamp(backlog, 1, 128)) == 0 ? 0 : FailErrno();
+}
+
+RECOMP_WS2(19, send, 4) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  ssize_t n = ::send(fd, GPtr(Arg(c, 1)), size_t(uint32_t(Arg(c, 2))), int(Arg(c, 3)) | kNoSignal);
+  return n < 0 ? FailErrno() : uint64_t(uint32_t(n));
+}
+
+RECOMP_WS2(16, recv, 4) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  ssize_t n = ::recv(fd, GPtr(Arg(c, 1)), size_t(uint32_t(Arg(c, 2))), int(Arg(c, 3)));
+  return n < 0 ? FailErrno() : uint64_t(uint32_t(n));
+}
+
+RECOMP_WS2(22, shutdown, 2) {  // SD_RECEIVE, SD_SEND, SD_BOTH are SHUT_RD, SHUT_WR, SHUT_RDWR
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  return ::shutdown(fd, int(Arg(c, 1))) == 0 ? 0 : FailErrno();
+}
+
+// SOL_SOCKET (0xFFFF) options as ints; the values are BSD's, the host's
+// differ where it is not BSD.
+constexpr uint32_t kSolSocket = 0xFFFF;
+bool SocketOption(uint32_t level, uint32_t name, int* host_level, int* host_name) {
+  if (level != kSolSocket) return false;
+  *host_level = SOL_SOCKET;
+  switch (name) {
+    case 0x0020: *host_name = SO_BROADCAST; return true;
+    case 0x1001: *host_name = SO_SNDBUF; return true;
+    case 0x1002: *host_name = SO_RCVBUF; return true;
+    case 0x1007: *host_name = SO_ERROR; return true;
+  }
+  return false;
+}
+
+RECOMP_WS2(21, setsockopt, 5) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  int level, name;
+  if (!SocketOption(uint32_t(Arg(c, 1)), uint32_t(Arg(c, 2)), &level, &name) || Arg(c, 4) != 4)
+    FatalF("setsockopt(level %X, option %X, length %u) is not supported", uint32_t(Arg(c, 1)),
+           uint32_t(Arg(c, 2)), uint32_t(Arg(c, 4)));
+  int v = int(Rd32(Arg(c, 3)));
+  return ::setsockopt(fd, level, name, &v, sizeof v) == 0 ? 0 : FailErrno();
+}
+
+RECOMP_WS2(7, getsockopt, 5) {
+  int fd = SocketFd(Arg(c, 0));
+  if (fd < 0) return Fail(kWsaENotSock);
+  int level, name;
+  if (!SocketOption(uint32_t(Arg(c, 1)), uint32_t(Arg(c, 2)), &level, &name) ||
+      Rd32(Arg(c, 4)) != 4)
+    FatalF("getsockopt(level %X, option %X) is not supported", uint32_t(Arg(c, 1)),
+           uint32_t(Arg(c, 2)));
+  int v = 0;
+  socklen_t len = sizeof v;
+  if (::getsockopt(fd, level, name, &v, &len) != 0) return FailErrno();
+  if (name == SO_ERROR && v) v = int(WsaError(v));
+  Wr32(Arg(c, 3), uint32_t(v));
+  return 0;
+}
+
+// fd_set: a count, then the SOCKETs (4 bytes each; 8 at 8 on x64).
+struct FdSet {
+  gaddr va;
+  uint32_t stride() const { return g_proc->x64 ? 8 : 4; }
+  gaddr At(uint32_t i) const { return va + (g_proc->x64 ? 8 : 4) + i * stride(); }
+  uint32_t Count() const { return Rd32(va); }
+  uint32_t Socket(uint32_t i) const { return Rd32(At(i)); }
+};
+
+RECOMP_WS2(18, select, 5) {
+  FdSet sets[3] = {{Arg(c, 1)}, {Arg(c, 2)}, {Arg(c, 3)}};  // read, write, except
+  std::vector<pollfd> fds;
+  std::vector<std::pair<int, uint32_t>> owner;  // set, index within it
+  for (int k = 0; k < 3; k++) {
+    if (!sets[k].va) continue;
+    uint32_t n = std::min<uint32_t>(sets[k].Count(), 64);
+    for (uint32_t i = 0; i < n; i++) {
+      int fd = SocketFd(sets[k].Socket(i));
+      if (fd < 0) return Fail(kWsaENotSock);
+      fds.push_back({fd, short(k == 0 ? POLLIN : k == 1 ? POLLOUT : POLLPRI), 0});
+      owner.push_back({k, i});
+    }
+  }
+  if (fds.empty()) return Fail(kWsaEInval);
+  int timeout = -1;
+  if (gaddr tv = Arg(c, 4)) {
+    uint64_t us = uint64_t(Rd32(tv)) * 1000000 + Rd32(tv + 4);
+    timeout = int((us + 999) / 1000);
+  }
+  int n = ::poll(fds.data(), nfds_t(fds.size()), timeout);
+  if (n < 0) return FailErrno();
+  // A failed connect shows in the except set; hang-ups and errors make a
+  // socket readable (the next recv reports them) and writable.
+  uint32_t kept[3] = {};
+  uint32_t ready = 0;
+  for (size_t j = 0; j < fds.size(); j++) {
+    auto [k, i] = owner[j];
+    short re = fds[j].revents;
+    bool hit = k == 0 ? re & (POLLIN | POLLHUP | POLLERR)
+               : k == 1 ? re & (POLLOUT | POLLERR)
+                        : re & POLLPRI;
+    if (!hit) continue;
+    Wr32(sets[k].At(kept[k]++), sets[k].Socket(i));
+    ready++;
+  }
+  for (int k = 0; k < 3; k++)
+    if (sets[k].va) Wr32(sets[k].va, kept[k]);
+  return ready;
+}
+
+RECOMP_WS2(151, __WSAFDIsSet, 2) {
+  FdSet set{Arg(c, 1)};
+  for (uint32_t i = 0, n = std::min<uint32_t>(set.Count(), 64); i < n; i++)
+    if (set.Socket(i) == uint32_t(Arg(c, 0))) return 1;
+  return 0;
+}
+
+// inet_addr / inet_ntoa: IPv4 text and the in_addr passed by value.
+RECOMP_WS2(11, inet_addr, 1) { return ::inet_addr(GStr(Arg(c, 0)).c_str()); }
+RECOMP_WS2(12, inet_ntoa, 1) {
+  static thread_local gaddr buf = 0;
+  if (!buf) buf = HeapAllocProcess(16, true);
+  in_addr a;
+  a.s_addr = uint32_t(Arg(c, 0));
+  PutStr(buf, ::inet_ntoa(a));
+  return buf;
 }
 
 // Byte order: the guest is little-endian, network order big-endian.

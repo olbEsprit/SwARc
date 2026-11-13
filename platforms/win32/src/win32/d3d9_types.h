@@ -114,6 +114,20 @@ struct D3DVERTEXELEMENT9 {
   uint8_t Type, Method, Usage, UsageIndex;
 };
 
+struct D3DMATERIAL9 {
+  D3DCOLORVALUE Diffuse, Ambient, Specular, Emissive;
+  float Power;
+};
+static_assert(sizeof(D3DMATERIAL9) == 68, "D3DMATERIAL9 size");
+
+struct D3DLIGHT9 {
+  DWORD Type;
+  D3DCOLORVALUE Diffuse, Specular, Ambient;
+  D3DVECTOR Position, Direction;
+  float Range, Falloff, Attenuation0, Attenuation1, Attenuation2, Theta, Phi;
+};
+static_assert(sizeof(D3DLIGHT9) == 104, "D3DLIGHT9 size");
+
 struct D3DVERTEXBUFFER_DESC {
   D3DFORMAT Format;
   DWORD Type, Usage, Pool;

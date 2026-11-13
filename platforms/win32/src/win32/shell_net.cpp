@@ -59,6 +59,18 @@ HLE_NAMED("shell32.dll", "SHGetFolderPathA", Shell32GetFolderPathA, 5) {
   return GetFolderPathA(c);
 }
 
+HLE("shell32.dll", SHGetSpecialFolderPathA, 4) {
+  uint32_t csidl = Arg(c, 2), out = Arg(c, 1);
+  std::string p = FolderFor(csidl);
+  if (p.empty()) {
+    WarnF("SHGetSpecialFolderPathA(CSIDL %X): unknown folder\n", csidl);
+    return 0;
+  }
+  MakeDirs(HostPath(p));
+  PutStr(out, p);
+  return 1;
+}
+
 HLE("shfolder.dll", SHGetFolderPathW, 5) {
   uint32_t csidl = Arg(c, 1), out = Arg(c, 4);
   std::string p = FolderFor(csidl);
@@ -127,8 +139,6 @@ HLE_NAMED("wsock32.dll", "#115", WSAStartup, 2) {  // WSAStartup(version, WSADAT
   return 0;
 }
 
-HLE_NAMED("wsock32.dll", "#116", WSACleanup, 0) { return 0; }  // WSACleanup
-
 HLE_NAMED("wsock32.dll", "#57", gethostname, 2) {  // gethostname(buf, len)
   std::string n = "localhost";
   if (Arg(c, 1) < n.size() + 1) return 0xFFFFFFFF;
@@ -154,12 +164,6 @@ HLE_NAMED("wsock32.dll", "#52", gethostbyname, 1) {
     Wr32(hostent + 12, list);    // h_addr_list
   }
   return hostent;
-}
-
-HLE_NAMED("wsock32.dll", "#14", htonl, 1) { return __builtin_bswap32(Arg(c, 0)); }  // htonl
-
-HLE_NAMED("wsock32.dll", "#10", ioctlsocket, 3) {  // ioctlsocket: no sockets exist
-  return 0xFFFFFFFF;
 }
 
 }  // namespace

@@ -56,6 +56,10 @@ if(FFMPEG_FOUND)
   add_library(recomp_dsound SHARED src/win32/dsound.cpp)
   target_link_libraries(recomp_dsound PUBLIC recomp_win32 recomp_audio)
 
+  # DirectShow filter graph (quartz) for audio files, on the software mixer.
+  add_library(recomp_quartz SHARED src/win32/quartz.cpp)
+  target_link_libraries(recomp_quartz PUBLIC recomp_win32 recomp_audio)
+
   # Bink video (binkw32) on ffmpeg; audio through the Miles mixer.
   add_library(recomp_bink SHARED src/win32/binkw32.cpp)
   target_link_libraries(recomp_bink PUBLIC recomp_mss32)
@@ -73,16 +77,16 @@ target_link_libraries(recomp_d3d7 PUBLIC recomp_win32 recomp_gfx)
 # DirectInput game controllers are XInput pads.
 add_library(recomp_xinput SHARED src/win32/xinput.cpp
             src/win32/wbem.cpp)
-target_link_libraries(recomp_xinput PUBLIC recomp_win32)
+target_link_libraries(recomp_xinput PUBLIC recomp_win32 PRIVATE recomp_gfx)
 
 # DirectInput 8 (keyboard and mouse) on the event pump's raw input; it
 # lists the XInput pads as game controllers.
 add_library(recomp_dinput8 SHARED src/win32/dinput8.cpp)
-target_link_libraries(recomp_dinput8 PUBLIC recomp_win32 recomp_xinput)
+target_link_libraries(recomp_dinput8 PUBLIC recomp_win32 recomp_xinput PRIVATE recomp_gfx)
 
 # Direct3D 9 and D3DX 9 over gfx::Device.
 add_library(recomp_d3d9 SHARED src/win32/d3d9.cpp
-  src/win32/d3d9_draw.cpp src/win32/d3d9_resource.cpp
+  src/win32/d3d9_draw.cpp src/win32/d3d9_resource.cpp src/win32/d3d9_fixed_vertex.cpp
   src/win32/d3dx9.cpp)
 target_link_libraries(recomp_d3d9 PUBLIC recomp_win32 recomp_gfx recomp_hlsl)
 # D3DX's maths rounds like the original only without contraction into FMA.

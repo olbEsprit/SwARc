@@ -27,6 +27,13 @@ target_compile_options(sse_rsqrt_test PRIVATE -O2)
 add_test(NAME sse_rsqrt COMMAND sse_rsqrt_test)
 set_tests_properties(sse_rsqrt PROPERTIES TIMEOUT 300)
 
+# mmx_test: x86/mmx.h on known results (header-only); portable.
+add_executable(mmx_test mmx_test.cpp)
+target_include_directories(mmx_test PRIVATE ${RECOMP_ROOT}/src)
+target_link_libraries(mmx_test PRIVATE recomp_x87)
+target_compile_options(mmx_test PRIVATE -O2)
+add_test(NAME mmx COMMAND mmx_test)
+
 # sse_ftz_test: FTZ and DAZ against the host (x86-64 hosts only).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   add_executable(sse_ftz_test sse_ftz_test.cpp)

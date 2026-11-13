@@ -13,6 +13,7 @@
 #include <cstring>
 #include <mutex>
 
+#include "runtime/gfx/overlay.h"
 #include "runtime/log.h"
 #include "win32/hle.h"
 #include "win32/user32_window.h"
@@ -115,8 +116,8 @@ HLE_NAMED("xinput1_3.dll", "#2", XInputGetState, 2) {
   Pad* p = PadAt(Arg(c, 0));
   if (!p) return ERROR_DEVICE_NOT_CONNECTED;
   if (!Arg(c, 1)) return ERROR_BAD_ARGUMENTS;
-  uint8_t g[12];
-  ReadGamepad(p->gp, g);
+  uint8_t g[12] = {};
+  if (!gfx::overlay::CapturesPad()) ReadGamepad(p->gp, g);
   if (std::memcmp(g, p->last, sizeof g) != 0) {
     std::memcpy(p->last, g, sizeof g);
     p->packet++;
@@ -169,10 +170,27 @@ std::vector<XInputPad> XInputPads() {
     SDL_Gamepad* gp = g_pads[i].gp;
     if (!gp) continue;
     const char* name = SDL_GetGamepadName(gp);
-    pads.push_back({i, SDL_GetGamepadVendor(gp), SDL_GetGamepadProduct(gp),
-                    name ? name : "Controller"});
+    pads.push_back({i, SDL_GetGamepadID(gp), SDL_GetGamepadVendor(gp),
+                    SDL_GetGamepadProduct(gp), name ? name : "Controller"});
   }
   return pads;
+}
+
+bool XInputPadRead(uint32_t index, uint32_t id, PadState* out) {
+  std::lock_guard<std::mutex> l(g_mu);
+  Pad* p = PadAt(index);
+  if (!p || SDL_GetGamepadID(p->gp) != id) return false;
+  if (gfx::overlay::CapturesPad()) {
+    *out = {};
+    return true;
+  }
+  static_assert(SDL_GAMEPAD_AXIS_COUNT == 6);
+  static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32);
+  for (int a = 0; a < SDL_GAMEPAD_AXIS_COUNT; a++)
+    out->axis[a] = int16_t(SDL_GetGamepadAxis(p->gp, SDL_GamepadAxis(a)));
+  for (int b = 0; b < 32; b++)
+    out->button[b] = b < SDL_GAMEPAD_BUTTON_COUNT && SDL_GetGamepadButton(p->gp, SDL_GamepadButton(b));
+  return true;
 }
 
 }  // namespace recomp::hle

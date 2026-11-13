@@ -7,15 +7,21 @@
 // registers and samplers are passed as they are. Draws without shaders
 // use gfx::Device's fixed-function pipeline (D3D7 semantics) with the
 // D3D9 state in its terms: sampler states at D3D7's texture-stage
-// positions, D3D9's transform numbers mapped. Mixing a shader with the
-// fixed-function pipeline and fixed-function draws with a vertex
-// declaration (no FVF) are not supported yet (fatal, named).
+// positions, D3D9's transform numbers mapped. A vertex shader with no pixel
+// shader gets a pixel shader generated from the texture-stage state, and a
+// pixel shader with no vertex shader a vertex shader generated from the
+// vertex declaration (d3d9_fixed_vertex.cpp); fixed-function draws with a
+// vertex declaration (no FVF) are not supported yet (fatal, named).
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
 #include <vector>
 
 #include "runtime/log.h"
+#include "win32/d3d9_fixed_vertex.h"
 #include "win32/d3d9_impl.h"
 #include "win32/hle.h"
 
@@ -113,7 +119,6 @@ gfx::FfState DrawState(const Device& d, bool fixed) {
     f.tss[s][20] = ss[9];                     // MAXMIPLEVEL
     f.tss[s][21] = ss[10];                    // MAXANISOTROPY
     auto* t = active ? com::As<Texture>(d.textures[s]) : nullptr;
-    if (t && t->cube) FatalF("d3d9: fixed-function stage %u with a cube texture", s);
     f.textures[s] = t ? t->tex : 0;
   }
   // D3DTS_VIEW 2, PROJECTION 3 and TEXTURE0-7 16-23 are D3D7's numbers;
@@ -126,6 +131,25 @@ gfx::FfState DrawState(const Device& d, bool fixed) {
     auto it = d.transforms.find(d3d9);
     if (it != d.transforms.end()) std::memcpy(gfx::FfTransform(f, d3d7), it->second.data(), 64);
   }
+  static_assert(sizeof f.material == sizeof d.material);
+  std::memcpy(&f.material, &d.material, sizeof f.material);
+  // The first eight enabled lights; one enabled but never set is D3D's default light.
+  f.light_count = 0;
+  for (const auto& [index, on] : d.light_on) {
+    if (!on || f.light_count == 8) continue;
+    gfx::Light& l = f.lights[f.light_count++];
+    auto it = d.lights.find(index);
+    if (it != d.lights.end()) {
+      static_assert(sizeof l == sizeof it->second);
+      std::memcpy(&l, &it->second, sizeof l);
+    } else {
+      l = {};
+      l.type = 3;
+      l.diffuse = {1, 1, 1, 0};
+      l.direction[2] = 1;
+    }
+  }
+  for (uint32_t i = 0; i < 6; i++) std::memcpy(f.clip[i], d.clip_planes[i], 16);
   return f;
 }
 
@@ -159,19 +183,218 @@ void DrawFixed(Device& d, gfx::ShaderDraw& sd, const char* what) {
   d.gfx->DrawFf(state, fd);
 }
 
+// The pixel shader for a draw with `vs` and no pixel shader: the texture-
+// stage cascade as straight-line code (ff.frag's Arg and Op maths), reading
+// only the varyings `vs` writes.
+std::string FixedFunctionPixelSource(const Device& d, const hlsl::Program& vs) {
+  auto has = [&](uint32_t usage, uint32_t index) {
+    return std::find(vs.varyings.begin(), vs.varyings.end(), hlsl::Semantic{usage, index}) !=
+           vs.varyings.end();
+  };
+  bool uses_spec = false, uses_tfactor = false, uses_splat = false;
+  std::set<uint32_t> texcoords;
+  auto arg = [&](uint32_t a) {
+    std::string v;
+    switch (a & 0xF) {
+      case 0: v = "diff"; break;
+      case 1: v = "cur"; break;
+      case 2: v = "tex"; break;
+      case 3: uses_tfactor = true; v = "tfactor"; break;
+      case 4: uses_spec = true; v = "spec"; break;
+      case 5: v = "temp"; break;
+      default: v = "float4(0.0, 0.0, 0.0, 0.0)"; break;
+    }
+    if (a & 0x20) v = "float4(" + v + ".a, " + v + ".a, " + v + ".a, " + v + ".a)";
+    if (a & 0x10) v = "1.0 - (" + v + ")";
+    return v;
+  };
+  auto mask = [](uint32_t op) {
+    if (op == 2) return 1;
+    if (op == 3) return 2;
+    if (op == 17 || op == 22 || op == 23) return 1;
+    if (op == 25 || op == 26) return 7;
+    return 3;
+  };
+  auto op = [&](uint32_t o, const std::string& a1, const std::string& a2,
+                const std::string& a0) {
+    switch (o) {
+      case 2: return a1;
+      case 3: return a2;
+      case 4: return a1 + " * " + a2;
+      case 5: return a1 + " * " + a2 + " * 2.0";
+      case 6: return a1 + " * " + a2 + " * 4.0";
+      case 7: return a1 + " + " + a2;
+      case 8: return a1 + " + " + a2 + " - 0.5";
+      case 9: return "(" + a1 + " + " + a2 + " - 0.5) * 2.0";
+      case 10: return a1 + " - " + a2;
+      case 11: return a1 + " + " + a2 + " - " + a1 + " * " + a2;
+      case 12: return "lerp(" + a2 + ", " + a1 + ", diff.a)";
+      case 13: return "lerp(" + a2 + ", " + a1 + ", tex.a)";
+      case 14: uses_tfactor = true; return "lerp(" + a2 + ", " + a1 + ", tfactor.a)";
+      case 15: return a1 + " + " + a2 + " * (1.0 - tex.a)";
+      case 16: return "lerp(" + a2 + ", " + a1 + ", cur.a)";
+      case 17: return a1;
+      case 18: return "float4(" + a1 + ".rgb + " + a1 + ".a * " + a2 + ".rgb, " + a1 + ".a)";
+      case 19: return "float4(" + a1 + ".rgb * " + a2 + ".rgb + " + a1 + ".a, " + a1 + ".a)";
+      case 20:
+        return "float4((1.0 - " + a1 + ".a) * " + a2 + ".rgb + " + a1 + ".rgb, " + a1 + ".a)";
+      case 21:
+        return "float4((1.0 - " + a1 + ".rgb) * " + a2 + ".rgb + " + a1 + ".a, " + a1 + ".a)";
+      case 24:
+        uses_splat = true;
+        return "ff_splat(saturate(4.0 * dot(" + a1 + ".rgb - 0.5, " + a2 + ".rgb - 0.5)))";
+      case 25: return a0 + " + " + a1 + " * " + a2;
+      case 26: return "lerp(" + a2 + ", " + a1 + ", " + a0 + ")";
+      default: return a1;
+    }
+  };
+  auto sample = [&](uint32_t s, const Texture& t) {
+    uint32_t k = d.tss[s][11] & 0xFFFF;
+    std::string coord = "float4(0.0, 0.0, 0.0, 0.0)";
+    if (has(hlsl::kTexcoord, k)) {
+      coord = "v_texcoord" + std::to_string(k);
+      texcoords.insert(k);
+    }
+    bool proj = d.tss[s][24] & 0x100;
+    std::string sn = "s" + std::to_string(s);
+    if (t.cube)
+      return proj ? "texCUBEproj(" + sn + ", " + coord + ")"
+                  : "texCUBE(" + sn + ", (" + coord + ").xyz)";
+    return proj ? "tex2Dproj(" + sn + ", " + coord + ")"
+                : "tex2D(" + sn + ", (" + coord + ").xy)";
+  };
+
+  std::string samplers, body;
+  for (uint32_t s = 0; s < 8; s++) {
+    uint32_t cop = d.tss[s][1];
+    if (cop == 1) break;  // DISABLE ends the cascade
+    body += "  {\n";
+    auto* t = com::As<Texture>(d.textures[s]);
+    if (t) {
+      samplers += std::string(t->cube ? "samplerCUBE " : "sampler2D ") + "s" +
+                  std::to_string(s) + " : register(s" + std::to_string(s) + ");\n";
+      body += "    float4 tex = " + sample(s, *t) + ";\n";
+    } else {
+      body += "    float4 tex = float4(0.0, 0.0, 0.0, 1.0);\n";
+    }
+    uint32_t m = mask(cop);
+    if (m & 1) body += "    float4 c1 = " + arg(d.tss[s][2]) + ";\n";
+    if (m & 2) body += "    float4 c2 = " + arg(d.tss[s][3]) + ";\n";
+    if (m & 4) body += "    float4 c0 = " + arg(d.tss[s][26]) + ";\n";
+    body += "    float3 rgb = saturate((" + op(cop, "c1", "c2", "c0") + ").rgb);\n";
+    body += "    float al = cur.a;\n";
+    uint32_t aop = d.tss[s][4];
+    if (aop != 1) {
+      uint32_t am = mask(aop);
+      if (am & 1) body += "    float4 d1 = " + arg(d.tss[s][5]) + ";\n";
+      if (am & 2) body += "    float4 d2 = " + arg(d.tss[s][6]) + ";\n";
+      if (am & 4) body += "    float4 d0 = " + arg(d.tss[s][27]) + ";\n";
+      body += "    al = saturate((" + op(aop, "d1", "d2", "d0") + ").a);\n";
+    }
+    if (cop == 24) body += "    al = rgb.r;\n";  // DOTPRODUCT3 replicates into alpha
+    if (d.tss[s][28] == 5)
+      body += "    temp = float4(rgb, al);\n";
+    else
+      body += "    cur = float4(rgb, al);\n";
+    body += "  }\n";
+  }
+  if (d.rs[29]) {
+    uses_spec = true;
+    body += "  cur.rgb = saturate(cur.rgb + spec.rgb);\n";
+  }
+
+  bool has_diff = has(hlsl::kColor, 0), has_spec = has(hlsl::kColor, 1);
+  std::string params;
+  auto param = [&](const std::string& name, const std::string& sem) {
+    if (!params.empty()) params += ", ";
+    params += "float4 " + name + " : " + sem;
+  };
+  if (has_diff) param("v_color0", "COLOR0");
+  if (uses_spec && has_spec) param("v_color1", "COLOR1");
+  for (uint32_t k : texcoords) {
+    param("v_texcoord" + std::to_string(k), "TEXCOORD" + std::to_string(k));
+  }
+
+  std::string src = samplers.empty() ? "" : samplers + "\n";
+  if (uses_tfactor) src += "float4 tfactor : register(c0);\n\n";
+  if (uses_splat) src += "float4 ff_splat(float x) { return float4(x, x, x, x); }\n\n";
+  src += "float4 main(" + params + ") : COLOR0 {\n";
+  src += has_diff ? "  float4 diff = v_color0;\n"
+                  : "  float4 diff = float4(1.0, 1.0, 1.0, 1.0);\n";
+  if (uses_spec)
+    src += has_spec ? "  float4 spec = v_color1;\n"
+                    : "  float4 spec = float4(0.0, 0.0, 0.0, 0.0);\n";
+  src += "  float4 cur = diff;\n  float4 temp = float4(0.0, 0.0, 0.0, 0.0);\n";
+  src += body + "  return cur;\n}\n";
+  return src;
+}
+
+// A generated shader for `source`, created on first use and kept in the
+// device (each source is one gfx shader).
+Shader* Generated(Device& d, std::map<std::string, std::shared_ptr<Shader>>& cache,
+                  const std::string& source, bool pixel) {
+  auto it = cache.find(source);
+  if (it != cache.end()) return it->second.get();
+  auto program = std::make_shared<hlsl::Program>();
+  std::string errors;
+  if (!hlsl::Compile(source, {}, "main", pixel ? "ps_3_0" : "vs_3_0", 0, program.get(), &errors))
+    FatalF("d3d9: the generated fixed-function %s shader does not compile:\n%s\n%s",
+           pixel ? "pixel" : "vertex", errors.c_str(), source.c_str());
+  auto s = std::make_shared<Shader>();
+  s->device = d.guest;
+  s->pixel = pixel;
+  s->program = std::move(program);
+  s->id = d.gfx->CreateShader(*s->program);
+  return cache.emplace(source, std::move(s)).first->second.get();
+}
+
 // Completes `sd` (primitive, counts, and any streams already given) from
 // the device's bindings and draws it.
+bool Pretransformed(const Device& d) {
+  if (auto* decl = com::As<VertexDecl>(d.decl)) {
+    for (const auto& e : decl->elements) {
+      if (e.Stream == 0xFF) break;
+      if (e.Usage == USAGE_POSITIONT) return true;
+    }
+    return false;
+  }
+  return (d.fvf & 0x400E) == 0x004;
+}
+
+// A ps_1_x shader has no sampler declarations: each stage samples the
+// texture bound there, a cube or a 2D one. The variant for the cubes bound now.
+Shader* PixelVariant(const Device& d, Shader* ps) {
+  if (ps->program->major != 1 || ps->tokens.empty()) return ps;
+  uint32_t cubes = 0;
+  for (const hlsl::Sampler& smp : ps->program->samplers) {
+    auto* t = com::As<Texture>(d.textures[smp.reg]);
+    if (t && t->cube) cubes |= 1u << smp.reg;
+  }
+  if (!cubes) return ps;
+  auto& v = ps->variants[cubes];
+  if (v) return v.get();
+  auto program = std::make_shared<hlsl::Program>();
+  std::string err;
+  if (!hlsl::TranslateBytecode(ps->tokens.data(), ps->tokens.size(), program.get(), &err, cubes))
+    FatalF("d3d9: pixel shader with cube stages %02X: %s", cubes, err.c_str());
+  v = std::make_shared<Shader>();
+  v->device = d.guest;
+  v->pixel = true;
+  v->program = std::move(program);
+  v->id = d.gfx->CreateShader(*v->program);
+  return v.get();
+}
+
 void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
-  Shader* vs = com::As<Shader>(d.vs);
+  // D3D9 skips a bound vertex shader for pretransformed positions; games leave one bound over 2D quads.
+  Shader* vs = Pretransformed(d) ? nullptr : com::As<Shader>(d.vs);
   Shader* ps = com::As<Shader>(d.ps);
   if (!vs && !ps) {
     DrawFixed(d, sd, what);
     return;
   }
-  if (!vs || !ps)
-    FatalF("d3d9: %s with a %s shader and the fixed-function %s stage is not supported yet",
-           what, vs ? "vertex" : "pixel", vs ? "pixel" : "vertex");
-
+  bool ff_ps = !ps;
+  if (ps) ps = PixelVariant(d, ps);
   std::vector<guest::D3DVERTEXELEMENT9> from_fvf;
   const std::vector<guest::D3DVERTEXELEMENT9>* elements = nullptr;
   if (auto* decl = com::As<VertexDecl>(d.decl)) {
@@ -182,17 +405,34 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
   } else {
     FatalF("d3d9: %s without a vertex declaration or FVF", what);
   }
-  const auto& sem = vs->program->inputs;
-  std::vector<gfx::VertexInput> inputs(sem.size());
-  for (size_t i = 0; i < sem.size(); i++) {
-    for (const auto& e : *elements) {
-      if (e.Stream == 0xFF) break;
-      if (e.Usage == sem[i].usage && e.UsageIndex == sem[i].index) {
-        inputs[i] = {e.Stream, e.Offset, e.Type};
-        break;
+  float ff_constants[256][4] = {};
+  const float(*vs_float)[4] = d.vs_f;
+  if (!vs) {
+    FixedVertexState fv{elements, &ps->program->varyings, d.tss, d.rs[137] != 0, d.rs, {}};
+    std::vector<const guest::D3DLIGHT9*> lights;
+    if (fv.lighting)
+      for (const auto& [i, on] : d.light_on) {
+        auto it = d.lights.find(i);
+        if (!on || it == d.lights.end() || lights.size() == 8) continue;
+        lights.push_back(&it->second);
+        fv.light_types.push_back(it->second.Type);
       }
+    vs = Generated(d, d.ff_vertex, FixedVertexSource(fv), false);
+    if (fv.lighting && !Pretransformed(d)) FixedLightingConstants(d.transforms, d.rs, d.material, lights, ff_constants);
+    if (Pretransformed(d)) {
+      const guest::D3DVIEWPORT9& v = d.viewport;
+      ff_constants[0][0] = float(v.X);
+      ff_constants[0][1] = float(v.Y);
+      ff_constants[0][2] = float(v.Width);
+      ff_constants[0][3] = float(v.Height);
+    } else {
+      WorldViewProjection(d.transforms, &ff_constants[0][0]);
     }
+    vs_float = ff_constants;
+  } else if (!ps) {
+    ps = Generated(d, d.ff_pixel, FixedFunctionPixelSource(d, *vs->program), true);
   }
+  std::vector<gfx::VertexInput> inputs = VertexInputs(vs->program->inputs, *elements);
   sd.inputs = inputs.data();
   sd.input_count = uint32_t(inputs.size());
 
@@ -210,10 +450,20 @@ void Draw(Device& d, gfx::ShaderDraw& sd, const char* what) {
 
   sd.vs = vs->id;
   sd.ps = ps->id;
-  sd.vs_float = d.vs_f;
+  sd.vs_float = vs_float;
   sd.vs_int = d.vs_i;
   sd.vs_bool = reinterpret_cast<const uint32_t*>(d.vs_b);
   sd.ps_float = d.ps_f;
+  float ff_f[224][4];
+  if (ff_ps && ps->program->float_regs) {
+    std::memcpy(ff_f, d.ps_f, sizeof ff_f);
+    uint32_t tf = d.rs[60];
+    ff_f[0][0] = float(tf >> 16 & 0xFF) / 255.0f;
+    ff_f[0][1] = float(tf >> 8 & 0xFF) / 255.0f;
+    ff_f[0][2] = float(tf & 0xFF) / 255.0f;
+    ff_f[0][3] = float(tf >> 24 & 0xFF) / 255.0f;
+    sd.ps_float = ff_f;
+  }
   sd.ps_int = d.ps_i;
   sd.ps_bool = reinterpret_cast<const uint32_t*>(d.ps_b);
   for (int i = 0; i < 20; i++) {
@@ -321,8 +571,8 @@ gfx::ColorTarget StretchTarget(Surface* s, const char* which) {
     case Surface::Kind::RenderTarget:
       return {s->tex, 0};
     case Surface::Kind::TextureLevel:
-      if (!s->texture->cube && (s->texture->usage & D3DUSAGE_RENDERTARGET))
-        return {s->texture->tex, int(s->level)};
+      if (s->texture->usage & D3DUSAGE_RENDERTARGET)
+        return {s->texture->tex, int(s->level), s->texture->cube ? s->face : 0};
       break;
     default:
       break;

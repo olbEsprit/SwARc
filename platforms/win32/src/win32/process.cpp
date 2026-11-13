@@ -31,9 +31,9 @@ gaddr g_next_teb = 0;  // the next TEB is below it (kTebTop, kTebTop64)
 
 // The image's .text, where its lifted functions are.
 std::pair<gaddr, uint64_t> TextOf(const PeImage& img) {
-  for (const auto& s : img.sections)
-    if (s.name == ".text") return {s.va, s.vsize};
-  return {0, 0};
+  gaddr lo, hi;
+  img.CodeSpan(&lo, &hi);
+  return {lo, hi - lo};
 }
 
 // Process::thread_init: the thread's TEB and TLS array, in the layout of
@@ -148,6 +148,17 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
   std::string err;
   if (!w.img.Load(exe_path, p.mem, &err, 0, hle::ImportThunk))
     FatalF("%s", err.c_str());
+  for (const win32::GameConfig::ImagePatch& patch : game.image_patches) {
+    const uint64_t n = patch.bytes.size();
+    if (patch.va < w.img.image_base || patch.va + n > w.img.image_base + w.img.image_size)
+      FatalF("image patch at 0x%x is outside the image", patch.va);
+    if (patch.expect.size() != n || std::memcmp(p.mem.ptr(patch.va), patch.expect.data(), n) != 0)
+      FatalF("image patch at 0x%x: the image holds other bytes there (another build of the EXE?)", patch.va);
+    const Prot prot = p.mem.QueryProt(patch.va);
+    p.mem.Protect(patch.va, n, Prot::RW);
+    std::memcpy(p.mem.ptr(patch.va), patch.bytes.data(), n);
+    p.mem.Protect(patch.va, n, prot);
+  }
   for (const auto& d : game.lifted_dlls) {
     Module& m = w.modules.emplace_back();
     m.name = hle::NormaliseDll(d.name);
@@ -192,7 +203,7 @@ int RunProcess(const win32::GameConfig& game, const std::string& exe_path,
     Wr32(w.img.tls.index_va, 0);
   }
 
-  // Dispatch looks lifted code up in each image's .text: the EXE's first.
+  // Dispatch looks lifted code up in each image's code: the EXE's first.
   p.code.push_back(TextOf(w.img));
   for (const Module& m : w.modules) p.code.push_back(TextOf(m.img));
   InitDispatch();

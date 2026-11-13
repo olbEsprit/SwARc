@@ -326,7 +326,11 @@ HLE("user32.dll", RegisterWindowMessageA, 1) {
 }
 
 // Cursors and icons: opaque handles; the visible cursor is SDL's.
+uint32_t g_cursor_handle = 0;
 HLE("user32.dll", LoadCursorA, 2) { return 0x00010000u | (Arg(c, 1) & 0xFFFF); }
+HLE("user32.dll", GetCursor, 0) {
+  return g_cursor_handle ? g_cursor_handle : (0x00010000u | 32512);
+}
 HLE("user32.dll", LoadIconA, 2) { return 0x00020000u | (Arg(c, 1) & 0xFFFF); }
 
 // Images are opaque handles too: nothing is drawn through GDI. A file
@@ -350,9 +354,8 @@ HLE("user32.dll", LoadImageA, 6) {
   return next += 0x10;
 }
 HLE("user32.dll", SetCursor, 1) {
-  static uint32_t cur = 0;
-  uint32_t old = cur;
-  cur = Arg(c, 0);
+  uint32_t old = g_cursor_handle;
+  g_cursor_handle = Arg(c, 0);
   return old;
 }
 
@@ -436,11 +439,12 @@ HLE("user32.dll", MessageBoxW, 4) {
 // flags -#0, width, precision, h/l/ll prefixes, c C d i u x X s S %.
 // No floating point (user32's wsprintf has none).
 
-HLE("user32.dll", wsprintfA, kCdecl) {
-  uint32_t out = Arg(c, 0);
-  std::string fmt = GStr(Arg(c, 1));
-  int argi = 2;
-  auto next = [&]() { return Arg(c, argi++); };
+uint32_t Wvsprintf(uint32_t out, const std::string& fmt, uint32_t va) {
+  auto next = [&]() {
+    uint32_t v = Rd32(va);
+    va += 4;
+    return v;
+  };
   std::string r;
   for (size_t i = 0; i < fmt.size(); i++) {
     if (fmt[i] != '%') {
@@ -511,6 +515,14 @@ HLE("user32.dll", wsprintfA, kCdecl) {
   if (r.size() > 1023) r.resize(1023);  // wsprintf's documented limit
   PutStr(out, r);
   return uint32_t(r.size());
+}
+
+HLE("user32.dll", wsprintfA, kCdecl) {
+  return Wvsprintf(Arg(c, 0), GStr(Arg(c, 1)), c.esp + 12);
+}
+
+HLE("user32.dll", wvsprintfA, 3) {
+  return Wvsprintf(Arg(c, 0), GStr(Arg(c, 1)), Arg(c, 2));
 }
 
 }  // namespace

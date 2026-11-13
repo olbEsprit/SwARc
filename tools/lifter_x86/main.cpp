@@ -5,6 +5,7 @@
 //            [--x87-test OUT.cpp]   (forms for tests/x86/lift_x87_test.cpp)
 //            [--int-test OUT.cpp]   (forms for tests/x86/lift_int_test.cpp)
 //            [--sse-test OUT.cpp]   (forms for tests/x86/lift_sse_test.cpp)
+//            [--mmx-test OUT.cpp]   (forms for tests/x86/lift_mmx_test.cpp)
 //            [--module <game.dll> --symbols DIR [--manifest FILE]
 //             [--base HEX]]...
 //            [--only VA[,VA...]]   (just these functions and their callees)
@@ -54,11 +55,15 @@
 namespace {
 
 void ReplaceAll(std::string& s, const std::string& from, const std::string& to) {
-  size_t pos = 0;
-  while ((pos = s.find(from, pos)) != std::string::npos) {
-    s.replace(pos, from.size(), to);
-    pos += to.size();
+  std::string out;
+  out.reserve(s.size());
+  size_t pos = 0, hit;
+  while ((hit = s.find(from, pos)) != std::string::npos) {
+    out.append(s, pos, hit - pos).append(to);
+    pos = hit + from.size();
   }
+  out.append(s, pos, std::string::npos);
+  s = std::move(out);
 }
 
 // Shorten the fully qualified helper names; keeps generated files smaller
@@ -105,7 +110,7 @@ int main(int argc, char** argv) {
   std::string outdir = "generated";
   uint64_t per_file = 12000;
   uint64_t dump = 0;
-  std::string x87_test, int_test, sse_test, forms;
+  std::string x87_test, int_test, sse_test, mmx_test, forms;
   bool forms_x64 = false;
   std::set<uint64_t> only;
   for (int i = 1; i < argc; i++) {
@@ -124,6 +129,7 @@ int main(int argc, char** argv) {
     else if (a == "--sse-test") sse_test = val();
     else if (a == "--forms") forms = val();
     else if (a == "--x64") forms_x64 = true;
+    else if (a == "--mmx-test") mmx_test = val();
     else if (a == "--only") {
       std::string list = val();
       for (size_t pos = 0; pos < list.size();) {
@@ -173,12 +179,6 @@ int main(int argc, char** argv) {
   std::string prologue = kFilePrologue;
   if (p.x64)
     prologue.insert(prologue.find("#include"), "#define RECOMP_LIFT_X64 1\n");
-
-  // --int-test / --x87-test / --sse-test OUT: lifted instruction forms for
-  // tests/lift_{int,x87,sse}_test.cpp.
-  if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
-  if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
-  if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
 
   // --dump VA: show decoded operands of one function, for debugging the
   // emitter against Zydis' operand model.
@@ -296,6 +296,12 @@ int main(int argc, char** argv) {
               from_code_ptrs, from_data_ptrs, p.weak.size());
   std::printf("jump tables: %zu from Ghidra, %zu recovered\n",
               p.jumptables.size() - recovered_tables, recovered_tables);
+
+  // Oracle forms come from every function pass 1 found, discovered ones included.
+  if (!int_test.empty()) return lifter::WriteIntTest(p, dec, int_test, prologue.c_str());
+  if (!x87_test.empty()) return lifter::WriteX87Test(p, dec, x87_test, prologue.c_str());
+  if (!sse_test.empty()) return lifter::WriteSseTest(p, dec, sse_test, prologue.c_str());
+  if (!mmx_test.empty()) return lifter::WriteMmxTest(p, dec, mmx_test, prologue.c_str());
 
   // Pass 2: final CFGs and emission.
   std::filesystem::create_directories(outdir);

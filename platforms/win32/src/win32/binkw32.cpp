@@ -22,6 +22,8 @@
 #include <mutex>
 #include <vector>
 
+#include <unistd.h>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -40,7 +42,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr uint32_t kBinkFromMemory = 0x04000000, kBinkSndTrack = 0x00004000;
+constexpr uint32_t kBinkFromMemory = 0x04000000, kBinkFileHandle = 0x00800000,
+                   kBinkSndTrack = 0x00004000;
 constexpr uint32_t kBinkStructSize = 0x400;
 
 // BINK struct offsets (bink.h, 1.x; the track fields as 1.8 games read
@@ -355,6 +358,20 @@ HLE_NAMED("binkw32.dll", "_BinkOpen@8", BinkOpen, 2) {
     }
     m->data.assign(GPtr(src), GPtr(src) + size);
     what = "memory";
+  } else if (flags & kBinkFileHandle) {
+    // A Win32 file handle at the movie's first byte (it may sit inside a bigger file).
+    auto o = GetHandle(src);
+    int fd = o ? FileFd(o.get()) : -1;
+    uint8_t h8[8];
+    if (fd < 0 || read(fd, h8, 8) != 8 || std::memcmp(h8, "BIK", 3) != 0) {
+      WarnF("binkw32: BinkOpen: handle %08X is not at a Bink header\n", src);
+      return 0;
+    }
+    m->data.assign(h8, h8 + 8);
+    m->data.resize(Le32(h8 + 4) + 8);
+    ssize_t got = read(fd, m->data.data() + 8, m->data.size() - 8);
+    m->data.resize(8 + size_t(std::max<ssize_t>(got, 0)));
+    what = "file handle";
   } else {
     what = GStr(src);
     FILE* f = std::fopen(HostPath(what).c_str(), "rb");
@@ -429,8 +446,9 @@ HLE_NAMED("binkw32.dll", "_BinkClose@4", BinkClose, 1) {
     m = std::move(it->second);
     g_movies.erase(it);
   }
-  WarnF("binkw32: BinkClose at frame %u/%u (from %08X)\n", m->frame_num,
-        m->frames, Rd32(c.esp));
+  const double shown = m->started ? std::chrono::duration<double>(Clock::now() - m->start).count() : 0;
+  WarnF("binkw32: BinkClose at frame %u/%u after %.2f s, its time %.2f s (from %08X)\n", m->frame_num,
+        m->frames, shown, m->frame_num / m->fps, Rd32(c.esp));
   return 0;  // the guest block is leaked: 512 bytes per movie
 }
 

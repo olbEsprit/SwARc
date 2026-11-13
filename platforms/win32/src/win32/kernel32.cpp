@@ -403,6 +403,18 @@ HLE64("kernel32.dll", TerminateProcess, 2) {
   return 0;
 }
 
+HLE("kernel32.dll", GetExitCodeProcess, 2) {
+  if (Arg(c, 1)) Wr32(Arg(c, 1), 259);  // STILL_ACTIVE
+  return 1;
+}
+
+// (hNamedPipe, lpBuffer, nBufferSize, lpBytesRead, lpTotalBytesAvail,
+// lpBytesLeftThisMessage): no pipes exist.
+HLE("kernel32.dll", PeekNamedPipe, 6) {
+  SetLastError(kErrorInvalidHandle);
+  return 0;
+}
+
 HLE64("kernel32.dll", GetLastError, 0) {
   return Rd32(Teb(CurrentThread()) + 0x34);
 }
@@ -602,6 +614,9 @@ HLE("kernel32.dll", HeapSize, 3) {
 HLE("kernel32.dll", GlobalAlloc, 2) {
   // GMEM_MOVEABLE handles are returned as plain pointers; GlobalLock is
   // then the identity. Only used for clipboard data here.
+  return HeapAllocProcess(Arg(c, 1), Arg(c, 0) & 0x40);
+}
+HLE("kernel32.dll", LocalAlloc, 2) {
   return HeapAllocProcess(Arg(c, 1), Arg(c, 0) & 0x40);
 }
 HLE("kernel32.dll", GlobalLock, 1) { return Arg(c, 0); }
@@ -1003,6 +1018,13 @@ HLE("kernel32.dll", InterlockedExchange, 2) {
   return __atomic_exchange_n(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))),
                              Arg(c, 1), __ATOMIC_SEQ_CST);
 }
+HLE("kernel32.dll", InterlockedCompareExchange, 3) {
+  GuestSyncPoint sync;
+  uint32_t expected = Arg(c, 2);
+  __atomic_compare_exchange_n(reinterpret_cast<uint32_t*>(GPtr(Arg(c, 0))), &expected,
+                              Arg(c, 1), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  return expected;
+}
 
 // ---- time ----------------------------------------------------------------
 
@@ -1219,6 +1241,7 @@ HLE("kernel32.dll", LCMapStringA, 6) {
 }
 
 HLE("kernel32.dll", GetUserDefaultLCID, 0) { return 0x0409; }
+HLE("kernel32.dll", GetThreadLocale, 0) { return 0x0409; }
 HLE("kernel32.dll", GetUserDefaultLangID, 0) { return 0x0409; }
 HLE("kernel32.dll", IsValidLocale, 2) { return Arg(c, 0) == 0x0409 ? 1 : 0; }
 
@@ -1279,6 +1302,51 @@ uint32_t LocaleInfo(Ctx& c, bool wide) {
 
 HLE64("kernel32.dll", GetLocaleInfoA, 4) { return LocaleInfo(c, false); }
 HLE("kernel32.dll", GetLocaleInfoW, 4) { return LocaleInfo(c, true); }
+
+std::u16string ReadCounted(uint32_t p, int32_t n, bool wide) {
+  if (!p) return {};
+  if (n < 0) {
+    if (wide) return GWStr(p);
+    std::string s = GStr(p);
+    return std::u16string(s.begin(), s.end());
+  }
+  std::u16string s;
+  if (wide) {
+    for (int32_t i = 0; i < n; i++) s.push_back(Rd16(p + 2 * uint32_t(i)));
+  } else {
+    const char* q = g_proc->mem.ptr<const char>(p);
+    s.assign(q, q + n);
+  }
+  return s;
+}
+
+void FoldAscii(std::u16string& s) {
+  for (char16_t& ch : s)
+    if (ch >= u'A' && ch <= u'Z') ch += 32;
+}
+
+// CompareStringA/W(locale, flags, s1, cch1, s2, cch2): case folding is ASCII only.
+uint32_t CompareStrings(Ctx& c, bool wide) {
+  std::u16string a = ReadCounted(Arg(c, 2), int32_t(Arg(c, 3)), wide);
+  std::u16string b = ReadCounted(Arg(c, 4), int32_t(Arg(c, 5)), wide);
+  if (Arg(c, 1) & 0x1) {  // NORM_IGNORECASE
+    FoldAscii(a);
+    FoldAscii(b);
+  }
+  int r = a.compare(b);
+  return r < 0 ? 1 : r == 0 ? 2 : 3;  // CSTR_LESS_THAN/EQUAL/GREATER_THAN
+}
+
+HLE("kernel32.dll", CompareStringA, 6) { return CompareStrings(c, false); }
+HLE("kernel32.dll", CompareStringW, 6) { return CompareStrings(c, true); }
+
+HLE("kernel32.dll", lstrcmpiA, 2) {
+  std::u16string a = ReadCounted(Arg(c, 0), -1, false);
+  std::u16string b = ReadCounted(Arg(c, 1), -1, false);
+  FoldAscii(a);
+  FoldAscii(b);
+  return uint32_t(int32_t(a.compare(b)));
+}
 
 }  // namespace
 }  // namespace hle

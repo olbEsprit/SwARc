@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "runtime/env.h"
+#include "runtime/gfx/overlay.h"
 #include "runtime/log.h"
 
 namespace recomp::gfx {
@@ -25,6 +26,12 @@ void PresentWithDevAids(Device& dev, int w, int h) {
     const char* e = Env("SHOT_FROM");
     return e ? std::atoi(e) : 0;
   }();
+  static const bool hud_init = [] {
+    const char* e = Env("HUD");
+    if (e && *e == '1') gfx::overlay::SetTelemetry(2);
+    return true;
+  }();
+  (void)hud_init;
   static int frame = 0;
   frame++;
   if (every > 0 && frame >= from && frame % every == 0) {

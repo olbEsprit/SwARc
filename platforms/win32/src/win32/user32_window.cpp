@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "runtime/display.h"
+#include "runtime/gfx/overlay.h"
 #include "runtime/log.h"
 #include "win32/hle.h"
 #include "win32/input_state.h"
@@ -42,6 +43,7 @@ constexpr SDL_MouseID kTestPointer = 0xD51D51;
 
 namespace {
 
+void ToggleHostFullscreen(uint32_t hwnd);
 
 // ---- messages and styles -----------------------------------------------------
 enum : uint32_t {
@@ -449,9 +451,39 @@ void HandleSdlEvent(const SDL_Event& e) {
         ActivateApp(h, false);
       }
       break;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+      gfx::overlay::NotePadButton(e.gbutton.button, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
+      break;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
       uint32_t h = HwndForSdl(e.key.windowID);
+      if (h && e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat &&
+          e.key.scancode == SDL_SCANCODE_F && (e.key.mod & SDL_KMOD_GUI)) {
+        ToggleHostFullscreen(h);
+        break;
+      }
+      if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F3) {
+        gfx::overlay::SetTelemetry(gfx::overlay::TelemetryMode() + 1);
+        break;
+      }
+      if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.scancode == SDL_SCANCODE_F4) {
+        gfx::overlay::Press(gfx::overlay::Input::Toggle);
+        break;
+      }
+      if (e.type == SDL_EVENT_KEY_DOWN && gfx::overlay::IsOpen()) {
+        using gfx::overlay::Input;
+        switch (e.key.scancode) {
+          case SDL_SCANCODE_UP: gfx::overlay::Press(Input::Up); break;
+          case SDL_SCANCODE_DOWN: gfx::overlay::Press(Input::Down); break;
+          case SDL_SCANCODE_LEFT: gfx::overlay::Press(Input::Left); break;
+          case SDL_SCANCODE_RIGHT: gfx::overlay::Press(Input::Right); break;
+          case SDL_SCANCODE_RETURN: case SDL_SCANCODE_SPACE: gfx::overlay::Press(Input::Accept); break;
+          case SDL_SCANCODE_ESCAPE: case SDL_SCANCODE_BACKSPACE: gfx::overlay::Press(Input::Back); break;
+          default: break;
+        }
+        break;  // the game does not see keys pressed while the menu is open
+      }
       uint8_t vk = VkFromScancode(e.key.scancode);
       if (!h || !vk) break;
       bool down = e.type == SDL_EVENT_KEY_DOWN;
@@ -694,6 +726,33 @@ bool CoversScreen(const Window& w) {
   return ox <= 0 && oy <= 0 && ox + cw >= g_display_w && oy + ch >= g_display_h;
 }
 
+// A resizable host window keeps the game screen's shape, so resizing it adds no bars.
+void KeepAspect(SDL_Window* sdl, int cw, int ch) {
+  if (cw > 0 && ch > 0) SDL_SetWindowAspectRatio(sdl, float(cw) / float(ch), float(cw) / float(ch));
+}
+
+// Cmd+F: host fullscreen on or off whatever the game asked for.
+void ToggleHostFullscreen(uint32_t hwnd) {
+  SDL_Window* sdl;
+  int cw, ch;
+  {
+    std::lock_guard<std::recursive_mutex> l(g_mu);
+    Window* w = Win(hwnd);
+    if (!w || !w->sdl) return;
+    sdl = w->sdl;
+    GameClientSize(*w, &cw, &ch);
+  }
+  if (SDL_GetWindowFlags(sdl) & SDL_WINDOW_FULLSCREEN) {
+    SDL_SetWindowFullscreen(sdl, false);
+    SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
+    KeepAspect(sdl, cw, ch);
+  } else {
+    SDL_SetWindowAspectRatio(sdl, 0, 0);
+    SDL_SetWindowFullscreenMode(sdl, nullptr);
+    SDL_SetWindowFullscreen(sdl, true);
+  }
+}
+
 // Host fullscreen follows CoversScreen (GameConfig::fullscreen). Called
 // after anything that changes a window's placement, visibility or mode,
 // or the screen size. Leaving it gives the host window the client size
@@ -757,6 +816,7 @@ void UpdateFullscreen(uint32_t hwnd) {
   } else {
     SDL_SetWindowFullscreen(sdl, false);
     SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
+    KeepAspect(sdl, cw, ch);
   }
 }
 
@@ -1058,13 +1118,15 @@ void PumpHostEvents() {
   InjectTestStall();
   SDL_Event e;
   while (SDL_PollEvent(&e)) {
-    // Automated runs take input only from <ID>_TEST_INPUT: their windows
+    // Automated runs take input only from <ID>_TEST_INPUT (or keys pushed with
+    // the keyboard id kTestPointer, 0xD51D51): their windows
     // are on someone's desktop and stray clicks must not drive them.
     if (Background() && (e.type == SDL_EVENT_MOUSE_MOTION ||
                          e.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
                          e.type == SDL_EVENT_MOUSE_BUTTON_UP ||
                          e.type == SDL_EVENT_MOUSE_WHEEL ||
-                         e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP ||
+                         ((e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) &&
+                          e.key.which != kTestPointer) ||
                          e.type == SDL_EVENT_WINDOW_FOCUS_GAINED ||
                          e.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
                          e.type == SDL_EVENT_WINDOW_MOUSE_LEAVE))
@@ -1096,7 +1158,10 @@ void SetExclusiveMode(uint32_t hwnd, int w, int h) {
     win->mode_h = h;
     sdl = win->fullscreen ? nullptr : win->sdl;
   }
-  if (sdl && w) SDL_SetWindowSize(sdl, ToPoints(sdl, w), ToPoints(sdl, h));
+  if (sdl && w) {
+    SDL_SetWindowSize(sdl, ToPoints(sdl, w), ToPoints(sdl, h));
+    KeepAspect(sdl, w, h);
+  }
   UpdateFullscreen(hwnd);
 }
 
@@ -1255,7 +1320,7 @@ HLE("user32.dll", CreateWindowExA, 12) {
     ClientSize(win, &cw, &ch);
     win.sdl = SDL_CreateWindow(AnsiToUtf8(win.title).c_str(), ToPoints(nullptr, cw), ToPoints(nullptr, ch),
                                SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY |
-                                   gfx::ChosenWindowFlags());
+                                   SDL_WINDOW_RESIZABLE | gfx::ChosenWindowFlags());
     if (!win.sdl) FatalF("SDL_CreateWindow: %s", SDL_GetError());
   }
   uint32_t hwnd = win.hwnd;
@@ -1461,7 +1526,10 @@ void ApplyRect(uint32_t hwnd, int x, int y, int w, int h, bool move, bool size) 
     // a fullscreen one the screen's.
     sdl = win->mode_w || win->fullscreen ? nullptr : win->sdl;
   }
-  if (sdl && sized) SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
+  if (sdl && sized) {
+    SDL_SetWindowSize(sdl, ToPoints(sdl, cw), ToPoints(sdl, ch));
+    KeepAspect(sdl, cw, ch);
+  }
   if (moved || sized) UpdateFullscreen(hwnd);
   if (sized) Send(hwnd, WM_SIZE, 0, MkLparam(cw, ch));
   if (moved) Send(hwnd, WM_MOVE, 0, MkLparam(x, y));
@@ -2263,6 +2331,22 @@ HLE("user32.dll", EnumDisplaySettingsA, 3) {
   auto modes = Modes();
   if (idx >= modes.size()) return 0;
   PutDevMode(dm, modes[idx]);
+  return 1;
+}
+
+// (hMonitor, lpmi): one monitor, the whole screen the game sees.
+HLE("user32.dll", GetMonitorInfoA, 2) {
+  uint32_t p = Arg(c, 1);
+  if (!p) return 0;
+  Wr32(p + 4, 0);
+  Wr32(p + 8, 0);
+  Wr32(p + 12, uint32_t(g_display_w));
+  Wr32(p + 16, uint32_t(g_display_h));
+  Wr32(p + 20, 0);
+  Wr32(p + 24, 0);
+  Wr32(p + 28, uint32_t(g_display_w));
+  Wr32(p + 32, uint32_t(g_display_h));
+  Wr32(p + 36, 1);  // MONITORINFOF_PRIMARY
   return 1;
 }
 

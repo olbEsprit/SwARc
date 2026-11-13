@@ -50,6 +50,9 @@ bool ParseWav(const uint8_t* p, size_t len, WavInfo* out);
 std::unique_ptr<Source> MakeWavSource(Bytes data, std::string* err);
 // MPEG audio (MP3) through libavcodec.
 std::unique_ptr<Source> MakeMp3Source(Bytes data, std::string* err);
+// Any audio container libavformat reads (ASF/WMA, ...); seekable to any
+// frame and with a known Length when the container says it.
+std::unique_ptr<Source> MakeFileSource(Bytes data, std::string* err);
 // WAV if the data is RIFF, else MP3.
 std::unique_ptr<Source> MakeSource(Bytes data, std::string* err);
 

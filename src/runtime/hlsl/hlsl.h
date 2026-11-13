@@ -117,7 +117,10 @@ bool Compile(std::string_view source, const std::vector<Define>& defines,
 // CreateVertexShader / CreatePixelShader take them, END included) to the
 // same GLSL contract. No constant table: applications set the registers
 // the bytecode reads. On failure returns false with a message in *errors.
-bool TranslateBytecode(const uint32_t* tokens, size_t count, Program* out, std::string* errors);
+// ps_1_x has no sampler declarations: bit n of `cube_stages` makes the `tex tn`
+// sample a cube (from t_n's xyz), else a 2D texture.
+bool TranslateBytecode(const uint32_t* tokens, size_t count, Program* out, std::string* errors,
+                       uint32_t cube_stages = 0);
 
 // A Program as bytes and back (shader containers).
 std::vector<uint8_t> Serialize(const Program& p);

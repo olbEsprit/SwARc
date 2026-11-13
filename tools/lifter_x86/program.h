@@ -20,7 +20,17 @@ struct Module {
   std::string name;  // file name without extension, e.g. "game"
   // Where it is mapped, and the base its symbol files and manifest use.
   uint64_t base = 0, preferred_base = 0;
-  uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) of .text
+  uint64_t text_lo = 0, text_hi = 0;  // [lo, hi) spanning the code
+  // [lo, hi) of each code section, for formats with code outside one
+  // section (packed or protected PEs); empty: [text_lo, text_hi).
+  std::vector<std::pair<uint64_t, uint64_t>> code;
+  // End of the code section holding va, or 0.
+  uint64_t CodeEnd(uint64_t va) const {
+    if (code.empty()) return va >= text_lo && va < text_hi ? text_hi : 0;
+    for (const auto& [lo, hi] : code)
+      if (va >= lo && va < hi) return hi;
+    return 0;
+  }
   // Initialised data scanned for code pointers, as [lo, hi) ranges.
   std::vector<std::pair<uint64_t, uint64_t>> data;
   // Read-only data outside .text that may hold switch tables (an ELF's
@@ -119,15 +129,15 @@ struct Program {
   // resume/replace/host/setjmp lines, VAs at its preferred base).
   bool LoadManifest(const std::string& path, std::string* err);
 
-  // The module whose .text contains va, or null.
+  // The module whose code contains va, or null.
   const Module* TextOf(uint64_t va) const {
     for (const auto& m : modules)
-      if (va >= m.text_lo && va < m.text_hi) return &m;
+      if (m.CodeEnd(va)) return &m;
     return nullptr;
   }
   bool InText(uint64_t va) const { return TextOf(va) != nullptr; }
   const uint8_t* Bytes(uint64_t va) const { return mem.ptr<uint8_t>(va); }
-  size_t BytesLeft(uint64_t va) const { return TextOf(va)->text_hi - va; }
+  size_t BytesLeft(uint64_t va) const { return TextOf(va)->CodeEnd(va) - va; }
 };
 
 }  // namespace lifter

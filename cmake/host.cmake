@@ -53,6 +53,7 @@ add_library(recomp_gfx SHARED
   src/runtime/gfx/device.cpp
   src/runtime/gfx/present.cpp
   src/runtime/gfx/gpu_device.cpp
+  src/runtime/gfx/overlay.cpp
   src/runtime/gfx/shader_compile.cpp)
 target_include_directories(recomp_gfx PUBLIC src)
 target_compile_features(recomp_gfx PUBLIC cxx_std_20)
@@ -140,6 +141,7 @@ if(FFMPEG_FOUND)
   # in it.
   add_library(recomp_audio SHARED
     src/runtime/audio/source.cpp
+    src/runtime/audio/media_player.cpp
     src/runtime/audio/mixer.cpp
     src/runtime/audio/reverb.cpp
     src/runtime/audio/digital_reverb.cpp

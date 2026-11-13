@@ -18,4 +18,6 @@ int WriteSseTest(const Program& p, const Decoder& dec, const std::string& out,
 // instruction per line as hex bytes, '#' to the end of the line a comment.
 int WriteFormListTest(const std::string& list, bool x64, const Decoder& dec,
                       const std::string& out, const char* prologue, bool sse);
+int WriteMmxTest(const Program& p, const Decoder& dec, const std::string& out,
+                 const char* prologue);
 }  // namespace lifter

@@ -6,8 +6,19 @@
 
 #include <cstdint>
 #include <cstring>
+#ifdef RECOMP_READ_WATCH
+#include <mach-o/dyld.h>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <set>
+#include <vector>
+#endif
 
 #include "x86/ctx.h"
+#include "x86/mmx.h"
 #include "x86/sse.h"
 #include "x86/x87.h"
 
@@ -74,9 +85,59 @@ inline constexpr uint64_t kTscHz = 3000000000;  // the rate Rdtsc counts at
 
 namespace lift {
 
+#ifdef RECOMP_READ_WATCH
+// Debug only: JUICED_WATCH_RANGES lists `lo hi` (hex, [lo,hi)) guest ranges; every guest read that
+// overlaps one is logged to JUICED_WATCH_LOG with the host address of the lifted code doing it.
+struct ReadWatch {
+  uint32_t lo = 0, span = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> ranges;
+  std::set<std::pair<uintptr_t, uint32_t>> seen;
+  std::mutex mu;
+  FILE* log = nullptr;
+  ReadWatch() {
+    const char* rf = std::getenv("JUICED_WATCH_RANGES");
+    const char* lf = std::getenv("JUICED_WATCH_LOG");
+    FILE* f = rf ? std::fopen(rf, "r") : nullptr;
+    unsigned x, y;
+    uint32_t mn = ~0u, mx = 0;
+    while (f && std::fscanf(f, "%x %x", &x, &y) == 2) {
+      ranges.emplace_back(x, y);
+      mn = std::min<uint32_t>(mn, x);
+      mx = std::max<uint32_t>(mx, y);
+    }
+    if (f) std::fclose(f);
+    if (ranges.empty()) return;
+    std::sort(ranges.begin(), ranges.end());
+    lo = mn;
+    span = mx - mn;
+    log = std::fopen(lf ? lf : "read-watch.log", "w");
+    std::fprintf(log, "slide %lx ranges %zu\n", (unsigned long)_dyld_get_image_vmaddr_slide(0), ranges.size());
+    std::fflush(log);
+  }
+};
+inline ReadWatch g_watch;
+[[gnu::noinline]] inline void WatchRead(uint32_t a, uint32_t n) {
+  auto& w = g_watch;
+  auto it = std::upper_bound(w.ranges.begin(), w.ranges.end(), std::make_pair(a + n, 0u));
+  bool hit = false;
+  for (auto r = w.ranges.begin(); r != it; ++r) hit |= r->first < a + n && a < r->second;
+  if (!hit) return;
+  uintptr_t ra = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
+  std::lock_guard<std::mutex> g(w.mu);
+  if (!w.seen.insert({ra, a}).second) return;
+  std::fprintf(w.log, "hit host %lx guest %08x size %u\n", (unsigned long)ra, a, n);
+  std::fflush(w.log);
+}
+#define RECOMP_WATCH(a, n) \
+  do { if (uint32_t(a) + 15 - ::recomp::lift::g_watch.lo < ::recomp::lift::g_watch.span + 15) ::recomp::lift::WatchRead(a, n); } while (0)
+#else
+#define RECOMP_WATCH(a, n) ((void)0)
+#endif
+
 // ---- memory -----------------------------------------------------------
 template <typename T>
-inline T Rd(const uint8_t* b, uint32_t a) {
+[[gnu::always_inline]] inline T Rd(const uint8_t* b, uint32_t a) {
+  RECOMP_WATCH(a, sizeof(T));
   T v;
   std::memcpy(&v, b + a, sizeof(T));
   return v;
@@ -107,7 +168,8 @@ inline T RdPoll(const uint8_t* b, uint64_t a) {
   __atomic_thread_fence(__ATOMIC_ACQUIRE);
   return Rd<T>(b, a);
 }
-inline x87::F80 RdF80(const uint8_t* b, uint64_t a) {
+[[gnu::always_inline]] inline x87::F80 RdF80(const uint8_t* b, uint64_t a) {
+  RECOMP_WATCH(uint32_t(a), 10);
   x87::F80 v;
   std::memcpy(&v.sig, b + a, 8);
   std::memcpy(&v.se, b + a + 8, 2);
@@ -638,7 +700,8 @@ inline uint64_t SetLo16(uint64_t r, uint64_t v) {
 
 // ---- atomics for lock-prefixed instructions -----------------------------
 template <typename T>
-inline T* AtomicPtr(uint8_t* b, uint64_t a) {
+[[gnu::always_inline]] inline T* AtomicPtr(uint8_t* b, uint64_t a) {
+  RECOMP_WATCH(uint32_t(a), sizeof(T));
   return reinterpret_cast<T*>(b + a);
 }
 // CMPXCHG16B: if the 16 bytes at p (16-byte aligned) equal hi:lo, stores

@@ -111,3 +111,14 @@ if(RECOMP_HOST)
   set_tests_properties(gfx_ff PROPERTIES SKIP_RETURN_CODE 77
                        ENVIRONMENT "SDL_VIDEO_DRIVER=offscreen;SDL_GPU_DRIVER=vulkan")
 endif()
+
+# media_player_test: an audio file on a mixer voice with a filter graph's
+# transport (runtime/audio/media_player.h), rendered offline; a synthetic
+# WAV always, a runtime-supplied file (MEDIA_PLAYER_TEST_FILE, e.g. ASF/WMA)
+# when set. Portable.
+if(FFMPEG_FOUND)
+  add_executable(media_player_test media_player_test.cpp)
+  target_link_libraries(media_player_test PRIVATE recomp_audio)
+  target_compile_features(media_player_test PRIVATE cxx_std_20)
+  add_test(NAME media_player COMMAND media_player_test)
+endif()

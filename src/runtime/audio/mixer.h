@@ -159,6 +159,8 @@ class Mixer {
   std::vector<float> wet_;  // mono sends to digital_
   std::vector<int32_t> wet_int_, reverb_out_;
   uint64_t mixed_ = 0;  // frames
+  double rms_sum_ = 0;
+  uint64_t rms_frames_ = 0;
   Vec3 lpos_, lface_{0, 0, 1}, lup_{0, 1, 0};  // face and up normalised
   float rolloff_ = 1.0f;
   miles65::Listener listener65_;

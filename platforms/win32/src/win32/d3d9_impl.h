@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "runtime/gfx/device.h"
@@ -97,6 +98,7 @@ struct Surface : com::Object {
   uint32_t container = 0;      // TextureLevel: the texture's guest pointer
   int face = 0, level = 0;
   uint32_t mem = 0;  // Offscreen: its pixels
+  uint32_t read_ticket = 0;  // RenderTarget: copy started by the last read-only lock
   uint32_t pitch = 0;
   ~Surface() override;
 };
@@ -145,6 +147,7 @@ struct Shader : com::Object {
   // the gfx shader made from it.
   std::shared_ptr<const hlsl::Program> program;
   gfx::ShaderId id = 0;
+  std::map<uint32_t, std::shared_ptr<Shader>> variants;  // ps_1_x by bound cube stages
   ~Shader() override;
 };
 
@@ -153,20 +156,48 @@ struct Query : com::Object {
   uint32_t type = 0;
 };
 
+struct DeviceState {
+  struct Stream {
+    uint32_t buffer = 0, offset = 0, stride = 0, freq = 1;
+  };
+  uint32_t textures[20] = {};  // samplers 0-15, then vertex samplers 0-3
+  Stream streams[16];
+  uint32_t indices = 0;
+  uint32_t decl = 0, vs = 0, ps = 0;
+  uint32_t rs[256] = {};
+  uint32_t ss[20][14] = {};  // samplers 0-15 and the 4 vertex samplers
+  uint32_t tss[8][33] = {};
+  uint32_t fvf = 0;
+  std::map<uint32_t, std::array<float, 16>> transforms;
+  guest::D3DMATERIAL9 material{};
+  std::map<uint32_t, guest::D3DLIGHT9> lights;
+  std::map<uint32_t, bool> light_on;
+  float clip_planes[6][4] = {};
+  guest::D3DVIEWPORT9 viewport{};
+  guest::D3DRECT scissor{};
+  float vs_f[256][4] = {}, ps_f[224][4] = {};
+  int32_t vs_i[16][4] = {}, ps_i[16][4] = {};
+  guest::BOOL vs_b[16] = {}, ps_b[16] = {};
+};
+
 struct Device : com::Object {
   uint32_t d3d = 0;  // IDirect3D9 guest pointer
   guest::D3DDEVICE_CREATION_PARAMETERS creation{};
   guest::D3DPRESENT_PARAMETERS pp{};
   uint32_t hwnd = 0;
   std::unique_ptr<gfx::Device> gfx;
+  // Pixel shaders generated for a vertex shader and the fixed-function
+  // pixel stage, by source (never published to the guest).
+  std::map<std::string, std::shared_ptr<Shader>> ff_pixel;
+  // The converse: vertex shaders generated for a pixel shader and the
+  // fixed-function vertex stage.
+  std::map<std::string, std::shared_ptr<Shader>> ff_vertex;
   std::shared_ptr<Surface> backbuffer, auto_depth;
   // Bound objects: guest pointers the device holds a reference to.
   uint32_t render_targets[4] = {};
   uint32_t depth_stencil = 0;
   uint32_t textures[20] = {};  // samplers 0-15, then vertex samplers 0-3
-  struct Stream {
-    uint32_t buffer = 0, offset = 0, stride = 0, freq = 1;
-  };
+  using Stream = DeviceState::Stream;
   Stream streams[16];
   uint32_t indices = 0;
   uint32_t decl = 0, vs = 0, ps = 0;
@@ -176,14 +207,29 @@ struct Device : com::Object {
   uint32_t fvf = 0;
   guest::BOOL software_vp = 0;
   std::map<uint32_t, std::array<float, 16>> transforms;
+  guest::D3DMATERIAL9 material{};
+  std::map<uint32_t, guest::D3DLIGHT9> lights;
+  std::map<uint32_t, bool> light_on;
+  float clip_planes[6][4] = {};
+  float npatch = 0.0f;
   guest::D3DVIEWPORT9 viewport{};
   guest::D3DRECT scissor{};
   float vs_f[256][4] = {}, ps_f[224][4] = {};
   int32_t vs_i[16][4] = {}, ps_i[16][4] = {};
   guest::BOOL vs_b[16] = {}, ps_b[16] = {};
   int scene_depth = 0;
+  // Render states as gfx has them (SyncState); all sent on the first sync.
+  uint32_t sent_rs[256] = {};
+  bool synced = false;
+  std::optional<DeviceState> recording_from;  // BeginStateBlock
   // The D3D cursor (SetCursorProperties / ShowCursor).
   bool cursor_shown = false, cursor_set = false;
+};
+
+struct StateBlock : com::Object {
+  uint32_t device = 0;
+  DeviceState state;
+  ~StateBlock() override;
 };
 
 // IUnknown::QueryInterface for an object with one interface `iid` (and

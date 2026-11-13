@@ -864,6 +864,9 @@ game's back. What games see and what the host shows:
   The bars appear when the mode's aspect differs from the screen's (4:3
   on 16:9 is pillarboxed) or the window manager gave the window another
   shape.
+- Host windows are resizable and keep the game screen's aspect
+  (SDL_SetWindowAspectRatio); Cmd+F toggles host fullscreen. A whole-number
+  scale is shown with nearest filtering, others linear.
 - Pointer: absolute positions map back through the same rectangle
   (positions over the bars clamp to the edge of the game's screen).
   Relative motion that drives a virtual cursor (clipped mouse look,

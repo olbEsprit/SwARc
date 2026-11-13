@@ -28,6 +28,9 @@ struct GameConfig : recomp::GameConfig {
   // paths with the root abbreviated: "HKLM\Software\...".
   struct RegistryString {
     std::string key, name, value;
+    // A value of another type (REG_BINARY 3, REG_DWORD 4): its raw bytes.
+    uint32_t type = 1;
+    std::vector<uint8_t> data;
   };
   std::vector<RegistryString> registry;
 
@@ -64,6 +67,27 @@ struct GameConfig : recomp::GameConfig {
     uint32_t base = 0;  // the lifter's --base for it; 0 = preferred base
   };
   std::vector<LiftedDll> lifted_dlls;
+
+  // DirectInput action maps on pads: DIBUTTON_ANY(n) is the pad's button n
+  // in its c_dfDIJoystick2 order. A game whose menus expect other buttons
+  // for its semantics names them here (an SDL_GamepadButton each, -1 for
+  // none). A DIKEYBOARD_* semantic named here is put on the pad too, in maps
+  // that steer (DIAXIS_DRIVINGR_STEER): a game's keys-only driving actions.
+  struct PadButton {
+    uint32_t semantic;
+    int button;
+  };
+  std::vector<PadButton> pad_buttons;
+
+  // Bytes written over the mapped image before it runs (whatever the
+  // section's protection), e.g. a game's tunables for the host screen.
+  // `expect` holds the image's bytes there; another build of the EXE is
+  // fatal rather than patched blindly.
+  struct ImagePatch {
+    uint32_t va;
+    std::vector<uint8_t> bytes, expect;
+  };
+  std::vector<ImagePatch> image_patches;
 };
 
 }  // namespace win32
