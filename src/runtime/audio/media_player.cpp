@@ -77,10 +77,7 @@ int64_t MediaPlayer::Position() {
 
 void MediaPlayer::SetState(State s) {
   std::lock_guard<std::mutex> l(GetMixer().mu());
-  if (s == State::Stopped) {
-    voice_->Seek(start_);
-    voice_->passes = 0;
-  }
+  // IMediaControl::Stop keeps the position (Run continues from it): rewinding restarted the pause menu's music.
   voice_->state = s == State::Running ? Voice::State::Playing : Voice::State::Paused;
   state_ = s;
 }
@@ -94,12 +91,12 @@ void MediaPlayer::SetPositions(uint32_t cur_mode, int64_t* cur, uint32_t stop_mo
     limit_->end = end;
   }
   if (cur_mode) {
-    start_ = std::min(Frame(cur_mode == 1 ? *cur : Time(now) + *cur), end);
-    voice_->Seek(start_);
+    const int64_t start = std::min(Frame(cur_mode == 1 ? *cur : Time(now) + *cur), end);
+    voice_->Seek(start);
     voice_->passes = 0;
     if (voice_->state == Voice::State::Done)
       voice_->state = state_ == State::Running ? Voice::State::Playing : Voice::State::Paused;
-    now = start_;
+    now = start;
   }
   if (cur) *cur = Time(std::min(now, end));
   if (stop) *stop = Time(end);

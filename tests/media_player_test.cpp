@@ -107,7 +107,7 @@ void TestPlayer(Bytes data, double seconds, bool exact_seek) {
   CHECK(Render(0.2) == 0);
   CHECK(p.Position() == pos);
   p.Stop();
-  CHECK(p.state() == MediaPlayer::State::Stopped && p.Position() == 0);
+  CHECK(p.state() == MediaPlayer::State::Stopped && p.Position() == pos);
 
   int64_t cur = 0, stop = 0;
   p.SetPositions(1, &cur, 0, &stop);
@@ -152,8 +152,9 @@ void TestPlayer(Bytes data, double seconds, bool exact_seek) {
   cur = kSec / 10;
   p.SetPositions(3, &cur, 0, &stop);
   CHECK(std::llabs(cur - before - kSec / 10) < kSec / 1000);
+  int64_t at = p.Position();
   p.Stop();
-  CHECK(p.Position() == cur || std::llabs(p.Position() - cur) < kSec / 100);
+  CHECK(p.Position() == at);
 }
 
 }  // namespace

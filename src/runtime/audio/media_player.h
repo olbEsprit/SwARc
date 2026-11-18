@@ -56,7 +56,7 @@ class MediaPlayer {
 
   std::unique_ptr<Voice> voice_;
   Limited* limit_ = nullptr;
-  int64_t frames_ = 0, start_ = 0;
+  int64_t frames_ = 0;
   int rate_ = 0;
   int32_t volume_ = 0;
   State state_ = State::Stopped;
