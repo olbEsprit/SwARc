@@ -254,6 +254,11 @@ long RunForms(long n) {
   arith("LoadF64Fast", run::LoadF64Fast(m64), [&] { return run::LoadF64(m64); });
   store("StoreF32Fast", run::StoreF32Fast(cw, a), [&] { return run::StoreF32(cw, a); });
   store("StoreF64Fast", run::StoreF64Fast(cw, a), [&] { return run::StoreF64(cw, a); });
+  // FIST: magnitudes from below 1/8 to past 2^64, with halves and integers among them (Sig's tie cases).
+  run::V iv{Sig(), (Rand() & 0x8000) | (0x3FFF - 3 + Rand() % 70)};
+  store("StoreI16", run::StoreI16(cw, iv), [&] { return run::StoreI16(cw, iv); });
+  store("StoreI32", run::StoreI32(cw, iv), [&] { return run::StoreI32(cw, iv); });
+  store("StoreI64", run::StoreI64(cw, iv), [&] { return run::StoreI64(cw, iv); });
   bool quiet = Rand() & 1;
   cmp("CompareFast", run::CompareFast(a, b, quiet), run::Compare(a, b, quiet));
   cmp("CompareF32Fast", run::CompareF32Fast(a, m32), run::CompareF32(a, m32));

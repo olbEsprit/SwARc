@@ -1031,10 +1031,52 @@ struct Stored {
 // --- integer stores --------------------------------------------------
 
 // FIST: `lo` is also the integer indefinite.
+// FIST of a normal value or zero in integers: the game's _ftol runs it per particle, and SoftFloat cost ~9 ns.
+bool StoreIntFast(int rc, F80 v, int64_t lo, int64_t hi, Stored* out) {
+  int e = ExpOf(v);
+  if (e == 0) {
+    if (v.sig) return false;
+    *out = {0, 0, false};
+    return true;
+  }
+  if (!(v.sig & kJ) || e == 0x7FFF) return false;
+  int k = e - 0x3FFF;  // |v| = sig / 2^63 * 2^k
+  if (k > 62) return false;
+  uint64_t ip, frac;   // integer part, fraction as a 64-bit binary fraction
+  if (k >= 0) {
+    int shift = 63 - k;
+    ip = v.sig >> shift;
+    frac = shift ? v.sig << (64 - shift) : 0;
+  } else {
+    ip = 0;
+    frac = k == -1 ? v.sig : 1;  // below a half: any nonzero value under 2^63 rounds the same
+  }
+  const uint64_t half = 1ull << 63;
+  bool neg = SignOf(v), away = false;
+  if (frac) {
+    switch (rc) {
+      case 0: away = (frac > half || (frac == half && (ip & 1))); break;
+      case 1: away = neg; break;
+      case 2: away = !neg; break;
+      default: break;
+    }
+  }
+  __int128 m = __int128(ip) + away;
+  __int128 r = neg ? -m : m;
+  if (r < lo || r > hi) {
+    *out = {uint64_t(lo), kIE, false};
+    return true;
+  }
+  *out = {uint64_t(int64_t(r)), uint16_t(frac ? kPE : 0), away};
+  return true;
+}
+
 Stored StoreIntValue(uint32_t cw, F80 v, int64_t lo, int64_t hi) {
   const uint64_t indefinite = uint64_t(lo);
   if (IsUnsupported(v) || ExpOf(v) == 0x7FFF) return {indefinite, kIE, false};
   int rc = RcOf(cw);
+  Stored fast;
+  if (!g_softfloat_only && StoreIntFast(rc, v, lo, hi, &fast)) return fast;
   extFloat80_t x = ToSf(Canonical(v));
   SfBegin(SfMode(rc), 80);
   int64_t r = extF80_to_i64(x, SfMode(rc), true);
