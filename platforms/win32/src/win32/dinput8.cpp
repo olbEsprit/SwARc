@@ -301,11 +301,18 @@ void FillPadInstance(DIDEVICEINSTANCEA* di, const XInputPad& pad) {
   di->wUsage = 5;      // game pad
 }
 
+// The pads to list: the connected ones, or user index 0 waiting for one, since games look for pads only at start.
+std::vector<XInputPad> PadSlots() {
+  std::vector<XInputPad> pads = XInputPads();
+  if (pads.empty() && !Background()) pads.push_back({0, 0, 0, 0, "Controller"});
+  return pads;
+}
+
 // The XInput pad a device instance GUID names (FillPadInstance).
 bool PadFromGuid(uint32_t va, XInputPad* out) {
   GUID g;
   std::memcpy(&g, GPtr(va), sizeof g);
-  for (const XInputPad& pad : XInputPads()) {
+  for (const XInputPad& pad : PadSlots()) {
     GUID want = PadInstanceGuid(pad);
     if (std::memcmp(&g, &want, sizeof g) == 0) {
       *out = pad;
@@ -502,7 +509,7 @@ HLE_NAMED("dinput8.dll", "IDirectInput8A::EnumDevices", DI8_EnumDevices, 5) {
     more = CallGuest(c, cb, {inst, ref});  // 0 = DIENUM_STOP
   }
   if (pads)
-    for (const XInputPad& pad : XInputPads()) {
+    for (const XInputPad& pad : PadSlots()) {
       if (!more) break;
       FillPadInstance(di, pad);
       more = CallGuest(c, cb, {inst, ref});
@@ -645,8 +652,6 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Acquire", DID8_Acquire, 1) {
   if (!d->data_size) return DIERR_INVALIDPARAM;
   if (d->acquired) return DI_NOEFFECT;
   if (d->pad) {
-    PadState probe;
-    if (!XInputPadRead(d->pad_info.index, d->pad_info.id, &probe)) return DIERR_UNPLUGGED;
     d->acquired = true;
     return DI_OK;
   }
@@ -679,8 +684,6 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Unacquire", DID8_Unacquire, 1) {
 HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::Poll", DID8_Poll, 1) {
   InputDevice* d = Dev(c);
   if (!d->acquired) return DIERR_NOTACQUIRED;
-  PadState probe;
-  if (d->pad && !XInputPadRead(d->pad_info.index, d->pad_info.id, &probe)) return DIERR_UNPLUGGED;
   return DI_NOEFFECT;
 }
 
@@ -693,7 +696,7 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceState", DID8_GetDeviceS
   if (d->pad) {
     if (d->mapped) FatalF("dinput8: GetDeviceState on a pad with an action map");
     PadState s;
-    if (!XInputPadRead(d->pad_info.index, d->pad_info.id, &s)) return DIERR_UNPLUGGED;
+    XInputPadRead(d->pad_info.index, &s);
     MapPadState(s, d->range, GPtr(out));
     return DI_OK;
   }
@@ -717,7 +720,7 @@ HLE_NAMED("dinput8.dll", "IDirectInputDevice8A::GetDeviceData", DID8_GetDeviceDa
   if (!d->buffer_size) return DIERR_INVALIDPARAM;  // DIERR_NOTBUFFERED
   if (obj_size != 16 && obj_size != 20) return DIERR_INVALIDPARAM;
   PadState s;
-  if (d->pad && !XInputPadRead(d->pad_info.index, d->pad_info.id, &s)) return DIERR_UNPLUGGED;
+  if (d->pad) XInputPadRead(d->pad_info.index, &s);
   std::lock_guard<std::mutex> l(g_mu);
   if (d->pad && d->mapped) {
     for (InputDevice::PadAction& a : d->pad_actions) {

@@ -27,7 +27,7 @@ struct PadState {
 // main thread (elsewhere: the pads already open).
 std::vector<XInputPad> XInputPads();
 
-// Reads the pad at `index` if it is still the one with SDL instance `id`.
-bool XInputPadRead(uint32_t index, uint32_t id, PadState* out);
+// Reads whichever pad is at `index` now (one connected or reconnected after the game looked), at rest if none.
+void XInputPadRead(uint32_t index, PadState* out);
 
 }  // namespace recomp::hle
