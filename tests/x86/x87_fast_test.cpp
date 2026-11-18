@@ -4,7 +4,7 @@
 // call (x87::run::*Fast: arithmetic with register, m32 and m64 operands,
 // m32/m64 loads and stores, compares) against the out-of-line run
 // functions on the SoftFloat path, and last the host-double forms
-// (x87::run::*D, control word 0x027F) the same way.
+// (x87::run::*D, control words 0x027F and 0x0C7F) the same way.
 // Portable, so it also runs on arm64. Every case runs one
 // instruction on identical states both ways and compares the registers,
 // the status word (flags, C1) and the tag word bit for bit. The SoftFloat
@@ -12,6 +12,7 @@
 //
 // Usage: x87_fast_test [cases] [seed]
 
+#include <algorithm>
 #include <bit>
 #include <cinttypes>
 #include <cstdio>
@@ -268,13 +269,14 @@ long RunForms(long n) {
 
 // ---- host doubles ---------------------------------------------------------
 //
-// Every *D function against the SoftFloat path at 0x027F. A *D function
+// Every *D function against the SoftFloat path at 0x027F and 0x0C7F (PC=24,
+// RC=chop; the arithmetic takes `chop`). A *D function
 // must succeed exactly when its result can be held (zero, or 53 bits with
 // a magnitude in [2^-511, 2^512): InRangeV, written independently of
 // x87.h), and then give the same value, flags and C1; on failure it must
 // leave its outputs alone.
 
-constexpr uint32_t kCw = 0x027F;
+uint32_t kCw = 0x027F;
 
 bool InRangeV(run::V v) {
   int e = int(v.se & 0x7FFF);
@@ -387,16 +389,39 @@ long DoubleForms() {
                                    "ArithD subr", "ArithD div", "ArithD divr"};
   long fails = 0;
   recomp::x87::g_softfloat_only = true;
+  kCw = Rand() & 1 ? 0x027F : 0x0C7F;
+  const bool chop = run::ChopMode(kCw);
   double a = RandIn(int(Rand() % 61) - 30), b = RandOther(a);
   int k = int(Rand() % 6);
+  if (chop && Rand() % 2) {
+    // The result lands on (or just above) a 24-bit cell boundary: the
+    // case chop's correction exists for.
+    const bool neg = Rand() & 1;
+    const double g = Make(ExpIn(0), Frac() & ~((1ull << 29) - 1), neg);
+    const double w = Rand() & 1 ? Make(ExpIn(0), Frac(), Rand() & 1) : Make(ExpIn(0), Frac() & ~((1ull << 29) - 1), Rand() & 1);
+    double x, y;
+    if (k == 0 || k == 2 || k == 3) {
+      x = g;
+      y = Make(std::clamp(ExpOf(g) - 24 - int(Rand() % 60), -511, 511), Frac(), Rand() & 1);
+    } else if (k == 1) {
+      x = g / w;
+      y = w;
+    } else {
+      x = g * w;
+      y = w;
+    }
+    if (k <= 3 && Rand() & 1) std::swap(x, y);
+    if (k == 5) std::swap(x, y);
+    if (run::InRange(x) && run::InRange(y)) a = x, b = y;
+  }
   run::RV ref = run::Arith(kCw, kOps[k], run::FromD(a), run::FromD(b));
   fails += CheckD(kOpNames[k], ref, [&](double* o, uint32_t* f, bool* u) {
-    return run::ArithD(kOps[k], a, b, o, f, u);
+    return run::ArithD(kOps[k], a, b, o, f, u, chop);
   }, a, b);
   // sqrt: in range, and negative operands (NaN, IE: never held).
   ref = run::Sqrt(kCw, run::FromD(a));
   fails += CheckD("SqrtD", ref, [&](double* o, uint32_t* f, bool* u) {
-    return run::SqrtD(a, o, f, u);
+    return run::SqrtD(a, o, f, u, chop);
   }, a, 0);
   // m32/m64 operands: held exactly when the load is flag-free and in range.
   uint32_t m32 = AnyF32();
@@ -429,7 +454,7 @@ long DoubleForms() {
   if (run::OperandF64(m64, &x0) && run::OperandF64(n64, &x1)) {
     run::RV r = run::ArithF64(kCw, kOps[k], run::Val(run::LoadF64(m64)), n64);
     fails += CheckD(kOpNames[k], r, [&](double* o, uint32_t* f, bool* u) {
-      return run::ArithD(kOps[k], x0, x1, o, f, u);
+      return run::ArithD(kOps[k], x0, x1, o, f, u, chop);
     }, x0, x1);
   }
   // FCOM m64 takes any zero or normal value.
@@ -551,8 +576,8 @@ int main(int argc, char** argv) {
   long dbl_fails = 0;
   for (long n = 0; n < cases && dbl_fails < 20; n++) dbl_fails += DoubleForms();
   std::printf("%ld cases of the host-double forms, %ld mismatches\n", cases, dbl_fails);
-  for (uint16_t cw : {0x027F, 0x067F, 0x0A7F, 0x0E7F, 0x007F, 0x037F, 0x127F})
-    if (run::DoubleMode(cw) != (cw == 0x027F || cw == 0x127F)) {
+  for (uint16_t cw : {0x027F, 0x067F, 0x0A7F, 0x0E7F, 0x007F, 0x037F, 0x127F, 0x0C7F, 0x1C7F, 0x0D7F, 0x087F, 0x047F, 0x0F7F})
+    if (run::DoubleMode(cw) != (cw == 0x027F || cw == 0x127F || cw == 0x0C7F || cw == 0x1C7F)) {
       std::printf("FAIL DoubleMode %04X\n", cw);
       ++dbl_fails;
     }

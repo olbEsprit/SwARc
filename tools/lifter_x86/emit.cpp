@@ -1320,8 +1320,8 @@ bool InsnEmitter::EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_
   };
   // An arithmetic result into x, with PE and C1.
   auto arith = [&](const std::string& o, const std::string& x, const std::string& src) {
-    check(Fmt("%s::ArithD(%s, %s, %s, &%s, &rfl, &rc1)", R, o.c_str(), x.c_str(), src.c_str(),
-              x.c_str()));
+    check(Fmt("%s::ArithD(%s, %s, %s, &%s, &rfl, &rc1, rchop)", R, o.c_str(), x.c_str(),
+              src.c_str(), x.c_str()));
     sim.c1_written = true;
   };
 
@@ -1463,7 +1463,7 @@ bool InsnEmitter::EmitX87Double(X87Sim& sim, const std::string& fail, bool* can_
     }
     case ZYDIS_MNEMONIC_FSQRT: {
       std::string x = sim.Read(0);
-      check(Fmt("%s::SqrtD(%s, &%s, &rfl, &rc1)", R, x.c_str(), x.c_str()));
+      check(Fmt("%s::SqrtD(%s, &%s, &rfl, &rc1, rchop)", R, x.c_str(), x.c_str()));
       sim.c1_written = true;
       sim.Write(0);
       return sim.ok;
@@ -3937,6 +3937,7 @@ void Emitter::EmitX87Run(const Function& f, std::map<uint64_t, Insn>::const_iter
         back += Fmt("  %s = ::recomp::x87::run::FromD(%s);\n", sim.Var(k).c_str(),
                     dsim.Var(k).c_str());
     o += "  if (::recomp::x87::run::DoubleMode(rcw)) {\n";
+    o += "  [[maybe_unused]] const bool rchop = ::recomp::x87::run::ChopMode(rcw);\n";
     o += "  double " + decl + ";\n";
     o += to.empty() ? "  {\n" : "  if (" + to + ") {\n";
     if (!resume.empty()) o += "  int rk;\n";

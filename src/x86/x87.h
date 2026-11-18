@@ -621,10 +621,14 @@ template <bool kWide = false>
 // changed; every thread that runs guest code checks it,
 // platform::HostFpProblem).
 
+// PC=24 with RC=chop (the other mode runs use host doubles in).
+[[gnu::always_inline]] inline bool ChopMode(uint32_t cw) { return (cw & 0x0F00u) == 0x0C00u; }
+
 // Whether runs under control word cw use host doubles: PC=53 with
-// RC=nearest (Guard has checked the exception masks).
+// RC=nearest, or PC=24 with RC=chop (Guard has checked the exception
+// masks).
 [[gnu::always_inline]] inline bool DoubleMode(uint32_t cw) {
-  return g_doubles && (cw & 0x0F00u) == 0x0200u;
+  return g_doubles && ((cw & 0x0F00u) == 0x0200u || ChopMode(cw));
 }
 
 // Zero, or a magnitude in [2^-511, 2^512): biased exponent 512..1534.
@@ -687,9 +691,38 @@ template <bool kWide = false>
   *up = inexact && ((eb ^ std::bit_cast<uint64_t>(ref)) >> 63);
 }
 
-// dst op src (Intel operand order), as Arith at PC=53/RC=nearest.
+// PC=24/RC=chop result from r = RN53(exact) and its error e (as NoteD):
+// the exact result lies in r's 24-bit cell unless r was rounded up onto
+// a cell boundary, so truncating r is right except then, where the
+// result is one double below r. C1 is never set (chop never rounds up).
+// The value path is one AND; the checks are branches off it.
+[[gnu::always_inline]] inline bool ChopD(double r, double e, double ref, double* out,
+                                         uint32_t* fl, bool* up) {
+  constexpr uint64_t kLow = (1ull << 29) - 1;
+  const uint64_t b = std::bit_cast<uint64_t>(r), eb = std::bit_cast<uint64_t>(e);
+  // In a vector register, so the chain stays in the FP unit (through a GPR it is 3x slower).
+  typedef double D1 __attribute__((vector_size(8)));
+  typedef uint64_t U1 __attribute__((vector_size(8)));
+  const D1 vr = {r};
+  double v = ((D1)((U1)vr & U1{~kLow}))[0];
+  const bool low = (b & kLow) != 0, inexact = (eb << 1) != 0;
+  if (!low && inexact && ((eb ^ std::bit_cast<uint64_t>(ref)) >> 63)) [[unlikely]] {
+    const uint64_t nb = (b - 1) & ~kLow;
+    if (!InRange(nb)) return false;
+    v = std::bit_cast<double>(nb);
+  } else if (!InRange(b)) [[unlikely]] {
+    return false;
+  }
+  *out = v;
+  *fl |= (low || inexact) ? 0x20u : 0u;
+  *up = false;
+  return true;
+}
+
+// dst op src (Intel operand order), as Arith at PC=53/RC=nearest, or at
+// PC=24/RC=chop when `chop`.
 [[gnu::always_inline]] inline bool ArithD(Op op, double dst, double src, double* out,
-                                          uint32_t* fl, bool* up) {
+                                          uint32_t* fl, bool* up, bool chop = false) {
   double a = dst, b = src, r, e, ref;
   if (op == Op::SubR || op == Op::DivR) {
     a = src;
@@ -716,6 +749,7 @@ template <bool kWide = false>
       break;
     }
   }
+  if (chop) return ChopD(r, e, ref, out, fl, up);
   if (!InRange(r)) return false;
   *out = r;
   NoteD(e, ref, fl, up);
@@ -723,8 +757,10 @@ template <bool kWide = false>
 }
 
 // FSQRT: a negative operand gives NaN, out of range.
-[[gnu::always_inline]] inline bool SqrtD(double a, double* out, uint32_t* fl, bool* up) {
+[[gnu::always_inline]] inline bool SqrtD(double a, double* out, uint32_t* fl, bool* up,
+                                         bool chop = false) {
   const double r = std::sqrt(a);
+  if (chop) return ChopD(r, std::fma(-r, r, a), r, out, fl, up);
   if (!InRange(r)) return false;
   *out = r;
   NoteD(std::fma(-r, r, a), r, fl, up);
@@ -733,8 +769,17 @@ template <bool kWide = false>
 
 // FST m32: (float)x when x is zero or in float's normal range and does
 // not round to infinity (exact: one rounding with RC=nearest); otherwise
-// the exact store (underflow, overflow).
+// the exact store (underflow, overflow). Under RC=chop the 29 low
+// significand bits are dropped (PE if any is set).
 [[gnu::always_inline]] inline SV StoreF32D(uint32_t cw, double x) {
+  if (ChopMode(cw)) {
+    const uint64_t b = std::bit_cast<uint64_t>(x), mag = b << 1 >> 1;
+    const uint64_t sign = (b >> 63) << 31;
+    if (!mag) return {sign, 0};
+    if ((mag >> 52) - 897 < 254)
+      return {sign | ((mag >> 29) - (896ull << 23)), (mag & ((1ull << 29) - 1)) ? 0x20u : 0u};
+    return StoreF32Fast(cw, FromD(x));
+  }
   const float f = float(x);
   const uint32_t fb = std::bit_cast<uint32_t>(f);
   const double m = std::fabs(x);
