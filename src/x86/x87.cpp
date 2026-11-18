@@ -1117,30 +1117,18 @@ Reduced ReduceTrig(uint64_t sig, int exp) {
     out.r = QFromSig(sig, exp);
     return out;
   }
-  // X = |x| * 2^65 = sig * 2^(exp + 2) is an integer; divide it by
-  // P = pi/2 * 2^65 bit by bit. The remainder stays below 2^67.
-  uint64_t rh = 0, rl = 0, q = 0;
-  const int bits = 64 + exp + 2;
-  for (int k = 0; k < bits; ++k) {
-    uint64_t bit = k < 64 ? (sig >> (63 - k)) & 1 : 0;
-    rh = (rh << 1) | (rl >> 63);
-    rl = (rl << 1) | bit;
-    q <<= 1;
-    if (rh > kPi66Hi || (rh == kPi66Hi && rl >= kPi66Lo)) {
-      rh -= kPi66Hi + (rl < kPi66Lo);
-      rl -= kPi66Lo;
-      q |= 1;
-    }
-  }
+  // X = |x| * 2^65 = sig * 2^(exp + 2) is an integer (below 2^127); divide
+  // it by P = pi/2 * 2^65. The remainder stays below 2^67.
+  using U128 = unsigned __int128;
+  const U128 P = (U128(kPi66Hi) << 64) | kPi66Lo, X = U128(sig) << (exp + 2);
+  U128 q = X / P, r = X - q * P;
   // Fold: r > P/2 (P is odd, so 2r != P) becomes r - P.
-  uint64_t dh = (rh << 1) | (rl >> 63), dl = rl << 1;
-  if (dh > kPi66Hi || (dh == kPi66Hi && dl > kPi66Lo)) {
-    uint64_t nh = kPi66Hi - rh - (kPi66Lo < rl);
-    rl = kPi66Lo - rl;
-    rh = nh;
+  if (r << 1 > P) {
+    r = P - r;
     out.r_neg = true;
     ++q;
   }
+  const uint64_t rh = uint64_t(r >> 64), rl = uint64_t(r);
   out.r = QFromU128(rh, rl, -65);
   out.n = static_cast<unsigned>(q & 3);
   return out;
