@@ -240,22 +240,20 @@ class FileSource : public Source {
     return done;
   }
 
-  // Exact: containers land on packet boundaries whose timestamps do not
-  // pin the decoder's frames, so the data is decoded up to f from the start
-  // (or from here, going forward).
+  // Near and short seeks decode up to f from the start or from here: exact to the sample. Far ones land by
+  // timestamp a second early (exact to the container's timestamps) and decode the rest, since decoding a long
+  // track from the start stalled the caller for seconds (a race's music, stopped on pause).
   bool Seek(int64_t f) override {
     f = std::max<int64_t>(f, 0);
-    if (f < pos_ || f == 0) {
+    if (f < pos_ || f == 0 || f - pos_ > 2 * int64_t(rate_)) {
       AVStream* st = fmt_->streams[stream_];
       int64_t t0 = st->start_time != AV_NOPTS_VALUE ? st->start_time : 0;
-      if (avformat_seek_file(fmt_, stream_, INT64_MIN, t0, t0, 0) < 0 &&
-          av_seek_frame(fmt_, stream_, t0, AVSEEK_FLAG_BACKWARD) < 0)
-        return false;
-      avcodec_flush_buffers(ctx_);
-      pending_.clear();
-      pending_pos_ = 0;
-      drained_ = false;
-      pos_ = 0;
+      int64_t near = f - rate_;
+      if (near <= 0 || !Land(t0 + av_rescale_q(near, AVRational{1, rate_}, st->time_base), true) ||
+          pos_ > f) {
+        if (!Land(t0, false)) return false;
+        pos_ = 0;
+      }
     }
     while (pos_ < f) {
       int64_t have = int64_t((pending_.size() - pending_pos_) / channels_);
@@ -300,6 +298,32 @@ class FileSource : public Source {
     return t;
   }
 
+  // Puts the demuxer at or before ts; with `resolve`, pos_ comes from the timestamp of the first frame there,
+  // less the skew between timestamps and frames that a decode from the start has measured.
+  bool Land(int64_t ts, bool resolve) {
+    if (resolve && skew_ == AV_NOPTS_VALUE) return false;
+    if (avformat_seek_file(fmt_, stream_, INT64_MIN, ts, ts, 0) < 0 &&
+        av_seek_frame(fmt_, stream_, ts, AVSEEK_FLAG_BACKWARD) < 0)
+      return false;
+    avcodec_flush_buffers(ctx_);
+    pending_.clear();
+    pending_pos_ = 0;
+    drained_ = false;
+    if (!resolve) return true;
+    landing_ = true;
+    bool ok = Decode();
+    landing_ = false;
+    if (!ok || landed_ == AV_NOPTS_VALUE) return false;
+    pos_ = Frames(landed_) - skew_;
+    return pos_ >= 0;
+  }
+
+  int64_t Frames(int64_t ts) const {
+    AVStream* st = fmt_->streams[stream_];
+    int64_t t0 = st->start_time != AV_NOPTS_VALUE ? st->start_time : 0;
+    return av_rescale_q(ts - t0, st->time_base, AVRational{1, rate_});
+  }
+
   // Decodes the next frame into pending_; false at the end of the data.
   bool Decode() {
     pending_.clear();
@@ -307,6 +331,8 @@ class FileSource : public Source {
     for (;;) {
       int r = avcodec_receive_frame(ctx_, frame_);
       if (r == 0) {
+        landed_ = frame_->best_effort_timestamp;
+        if (skew_ == AV_NOPTS_VALUE && !landing_ && landed_ != AV_NOPTS_VALUE) skew_ = Frames(landed_) - pos_;
         pending_.resize(size_t(frame_->nb_samples) * channels_);
         ConvertFrame(frame_, channels_, pending_.data());
         av_frame_unref(frame_);
@@ -336,6 +362,9 @@ class FileSource : public Source {
   int stream_ = -1;
   int64_t length_ = -1;
   int64_t pos_ = 0;  // frame index of pending_[pending_pos_]
+  int64_t landed_ = AV_NOPTS_VALUE;  // stream timestamp of the frame last decoded
+  int64_t skew_ = AV_NOPTS_VALUE;    // Frames(timestamp) - frame index, from a decode where both are known
+  bool landing_ = false;
   bool drained_ = false;
   std::vector<float> pending_;
   size_t pending_pos_ = 0;
